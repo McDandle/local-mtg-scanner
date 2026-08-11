@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.mtgtracker.server</string>
+  <!-- Edit the two paths below to your Python and your clone of this repo,
+       then: cp com.mtgtracker.server.plist ~/Library/LaunchAgents/ &&
+             launchctl load ~/Library/LaunchAgents/com.mtgtracker.server.plist -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/PATH/TO/card-scanner/server.py</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/PATH/TO/card-scanner</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/mtg-tracker.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/mtg-tracker.log</string>
+</dict>
+</plist>

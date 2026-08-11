@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#12151d">
+<title>MTG Tracker</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">✦</span>
+    <h1>MTG Tracker</h1>
+  </div>
+  <div class="top-actions">
+    <button id="pair-btn" class="ghost" title="Pair your phone as a scanner">📱 Pair</button>
+    <button id="refresh-btn" class="ghost" title="Fetch fresh prices">↻ Prices</button>
+  </div>
+</header>
+
+<main>
+  <!-- hero stats -->
+  <section class="hero">
+    <div class="hero-grid">
+      <div class="stat">
+        <span id="sum-value">$0.00</span>
+        <small>collection value</small>
+      </div>
+      <div class="stat">
+        <span id="sum-count">0</span>
+        <small>cards</small>
+      </div>
+      <div class="stat">
+        <span id="foil-value">$0</span>
+        <small>foil value</small>
+      </div>
+      <div class="stat stat-mvp">
+        <span id="mvp-card">—</span>
+        <small>most valuable</small>
+      </div>
+    </div>
+    <div id="rarity-bar" class="rarity-bar" aria-hidden="true"></div>
+    <div class="hero-foot">
+      <span id="breakdown" class="breakdown"></span>
+      <div id="localdb-box" class="localdb hidden">
+        <span class="localdb-dot" aria-hidden="true"></span>
+        <span id="localdb-status" class="localdb-status">Checking…</span>
+        <button id="localdb-btn" class="ghost small">Download</button>
+        <div id="localdb-bar-wrap" class="hidden"><div id="localdb-bar"></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- live feed of scans arriving from the phone -->
+  <div id="live-feed" class="hidden">
+    <img id="live-img" alt="">
+    <div>
+      <b id="live-title"></b>
+      <p id="live-sub"></p>
+    </div>
+  </div>
+
+  <!-- scanner -->
+  <section id="scanner" class="panel">
+    <h2 class="section-title"><span class="title-icon">📷</span> Scanner</h2>
+    <div class="scan-actions">
+      <button id="live-btn" class="primary-btn">🎥 Start live scanning</button>
+      <label id="photo-btn" for="camera-input">📷 Single photo
+        <input id="camera-input" type="file" accept="image/*" capture="environment">
+      </label>
+    </div>
+    <div id="scan-status" class="status hidden"></div>
+    <div id="scan-result" class="scan-result hidden">
+      <img id="result-img" alt="">
+      <div class="result-info">
+        <h3 id="result-name"></h3>
+        <p id="result-set"></p>
+        <p id="result-price" class="price"></p>
+        <div class="add-controls">
+          <label class="foil-toggle"><input type="checkbox" id="result-foil"> Foil</label>
+          <div class="qty-picker">
+            <button id="qty-minus">−</button>
+            <span id="qty-value">1</span>
+            <button id="qty-plus">+</button>
+          </div>
+          <button id="add-btn" class="primary">Add to library</button>
+        </div>
+        <p id="wrong-card">Not right? Search below or scan again.</p>
+      </div>
+    </div>
+    <div class="manual-search">
+      <input id="search-input" type="search" placeholder="Search cards — try “Plains 189”…">
+      <div id="search-results"></div>
+    </div>
+  </section>
+
+  <!-- library -->
+  <section id="library" class="panel">
+    <div class="lib-head">
+      <h2 class="section-title"><span class="title-icon">🗂</span> Library</h2>
+      <div class="lib-head-actions">
+        <button id="export-btn" class="ghost small" title="Download the library as CSV">⬇ Export</button>
+        <label id="import-label" class="ghost small" title="Import cards from a CSV file">
+          ⬆ Import<input id="import-input" type="file" accept=".csv,text/csv">
+        </label>
+        <div class="seg" id="view-toggle" title="Switch view">
+          <button data-view="grid" class="active" title="Grid view">▦</button>
+          <button data-view="list" title="List view">☰</button>
+        </div>
+      </div>
+    </div>
+    <div class="filter-row">
+      <input id="filter-input" type="search" placeholder="Filter library…">
+      <select id="sort-select">
+        <option value="collection">Collection</option>
+        <option value="price-low">Price Low</option>
+        <option value="price-high">Price High</option>
+        <option value="recent">Recently Added</option>
+        <option value="set">Set</option>
+        <option value="rarity">Rarity</option>
+      </select>
+    </div>
+    <div class="filter-row">
+      <select id="group-select">
+        <option value="set" selected>Group: Set</option>
+        <option value="rarity">Group: Rarity</option>
+        <option value="color">Group: Color</option>
+        <option value="letter">Group: A–Z</option>
+        <option value="none">No grouping</option>
+      </select>
+      <select id="filter-rarity">
+        <option value="all">Any rarity</option>
+        <option value="common">Common</option>
+        <option value="uncommon">Uncommon</option>
+        <option value="rare">Rare</option>
+        <option value="mythic">Mythic</option>
+        <option value="special">Special</option>
+      </select>
+      <select id="filter-color">
+        <option value="all">Any color</option>
+        <option value="W">White</option>
+        <option value="U">Blue</option>
+        <option value="B">Black</option>
+        <option value="R">Red</option>
+        <option value="G">Green</option>
+        <option value="multi">Multicolor</option>
+        <option value="colorless">Colorless</option>
+      </select>
+      <select id="filter-foil">
+        <option value="all">Any finish</option>
+        <option value="foil">Foil</option>
+        <option value="nonfoil">Non-foil</option>
+      </select>
+    </div>
+    <div id="library-list"></div>
+    <button id="load-more" class="ghost load-more hidden">Load more</button>
+  </section>
+</main>
+
+<!-- fullscreen live scanner -->
+<div id="scan-overlay" class="hidden">
+  <div class="scan-frame">
+    <video id="scan-video" playsinline muted autoplay></video>
+    <div id="scan-line" class="scan-line"></div>
+    <div id="focus-ring" class="hidden"></div>
+    <span class="scan-corner tl"></span><span class="scan-corner tr"></span>
+    <span class="scan-corner bl"></span><span class="scan-corner br"></span>
+  </div>
+  <div class="scan-detect">
+    <div id="scan-overlay-text">Point at a card…</div>
+    <button id="scan-confirm" class="scan-confirm hidden">✓ Add to library</button>
+  </div>
+  <div class="scan-topbar">
+    <span class="scan-live">● Live scan</span>
+    <button id="live-stop" class="danger">■ Stop</button>
+  </div>
+  <div class="scan-controls">
+    <label class="foil-toggle"><input type="checkbox" id="auto-add"> Auto-add on detect</label>
+    <label class="foil-toggle"><input type="checkbox" id="scan-foil"> Foil</label>
+    <span id="session-count" class="session-count"></span>
+    <div id="zoom-row" class="hidden">
+      <span>🔍</span>
+      <input id="zoom-slider" type="range">
+    </div>
+  </div>
+</div>
+
+<!-- phone pairing modal -->
+<div id="pair-modal" class="hidden">
+  <div class="modal-box pair-box">
+    <h3>Scan with your iPhone</h3>
+    <p class="pair-hint">Point the iPhone camera at this code — it opens the
+      live scanner. Safari will warn about the local certificate the first
+      time: tap <b>Show Details → visit this website</b>. That one-time step
+      is what lets the camera stream. Cards you scan appear here instantly.</p>
+    <div id="pair-qr"></div>
+    <p id="pair-url" class="pair-url"></p>
+    <button id="pair-close" class="ghost">Close</button>
+  </div>
+</div>
+
+<!-- card detail modal -->
+<div id="card-modal" class="hidden">
+  <div class="card-float">
+    <div class="flip3d" id="flip3d">
+      <div class="flip3d-inner" id="flip3d-inner">
+        <div class="flip3d-face flip3d-front"><img id="detail-img" alt=""></div>
+        <div class="flip3d-face flip3d-back"><img id="detail-back" alt=""></div>
+      </div>
+      <p class="flip-hint">↻ drag to flip</p>
+    </div>
+  </div>
+  <div class="modal-box detail-box">
+    <div class="detail-info">
+      <h3 id="detail-name"></h3>
+      <p id="detail-set"></p>
+      <p id="detail-prices" class="price"></p>
+      <a id="detail-scryfall" target="_blank" rel="noopener">View on Scryfall ↗</a>
+    </div>
+    <div class="detail-controls">
+      <label class="foil-toggle" title="Save applies the change"><input type="checkbox" id="detail-foil"> Foil</label>
+      <div class="qty-picker">
+        <button id="detail-qty-minus">−</button>
+        <span id="detail-qty">1</span>
+        <button id="detail-qty-plus">+</button>
+      </div>
+      <button id="detail-delete" class="danger">Delete</button>
+    </div>
+    <details class="printing-box">
+      <summary>Change printing</summary>
+      <input id="print-search" type="search" placeholder="Printings — name + number works too…">
+      <div id="print-results"></div>
+    </details>
+    <div id="detail-history"></div>
+    <div class="detail-actions">
+      <button id="detail-save" class="primary">Save changes</button>
+      <button id="detail-close" class="ghost">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="hidden"></div>
+<script src="/app.js"></script>
+</body>
+</html>

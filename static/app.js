@@ -1,0 +1,1056 @@
+"use strict";
+const $ = (id) => document.getElementById(id);
+
+// Card images are proxied through the server's local cache (/api/img) so
+// the library keeps working offline after the first view.
+function imgUrl(u) {
+  if (!u) return "";
+  return "/api/img?u=" + encodeURIComponent(u);
+}
+
+// Escape provider/CSV-supplied strings that end up in innerHTML templates.
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (ch) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+}
+
+function toast(msg, ms = 2400) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.remove("hidden");
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.add("hidden"), ms);
+}
+
+// ------------------------------------------------------------ state
+let libraryCards = [];
+const PAGE = 100;
+let pageSize = PAGE;
+let viewMode = "grid";
+try { viewMode = localStorage.getItem("mtg_view") || "grid"; } catch (e) {}
+let collapsedGroups = {};
+try { collapsedGroups = JSON.parse(localStorage.getItem("mtg_collapsed") || "{}") || {}; } catch (e) {}
+
+let currentCard = null;
+let qty = 1;
+let detailCard = null;
+let pendingCard = null;
+let printTimer = null;
+
+// live scanning state
+let liveActive = false;
+let liveStream = null;
+let liveBusy = false;
+let lastDetectedId = null;
+let stableCount = 0;
+let noMatchCount = 0;
+let lastAddedId = null;
+let sessionAdds = 0;
+let liveDetected = null;   // currently detected card (for the confirm button)
+let confirmedId = null;    // card already confirmed this pass
+let audioCtx = null;
+
+// ------------------------------------------------------------ stats
+const RARITY_RANK = { common: 0, uncommon: 1, rare: 2, mythic: 3, special: 4 };
+const RARITY_ORDER = ["common", "uncommon", "rare", "mythic", "special"];
+const COLOR_NAME = { W: "White", U: "Blue", B: "Black", R: "Red", G: "Green" };
+
+function updateStats() {
+  let total = 0, count = 0, foilVal = 0, mvp = null;
+  const rar = {};
+  for (const c of libraryCards) {
+    const v = c.line_value || 0;
+    total += v;
+    count += c.quantity;
+    if (c.foil) foilVal += v;
+    const k = c.rarity || "?";
+    rar[k] = rar[k] || { count: 0, value: 0 };
+    rar[k].count += c.quantity;
+    rar[k].value += v;
+    if (!mvp || v > mvp.value) mvp = { name: c.name, value: v };
+  }
+  $("sum-value").textContent = "$" + total.toFixed(2);
+  $("sum-count").textContent = count;
+  $("foil-value").textContent = "$" + foilVal.toFixed(0);
+  $("mvp-card").textContent = mvp ? mvp.name : "—";
+
+  const bar = $("rarity-bar");
+  bar.innerHTML = "";
+  for (const r of RARITY_ORDER) {
+    const d = rar[r];
+    if (!d || !d.value) continue;
+    const seg = document.createElement("div");
+    seg.className = "rar-seg r-" + r;
+    seg.style.width = (d.value / (total || 1)) * 100 + "%";
+    seg.title = `${r}: ${d.count} cards · $${d.value.toFixed(0)}`;
+    bar.appendChild(seg);
+  }
+  const parts = RARITY_ORDER.filter((r) => rar[r] && rar[r].value != null)
+    .map((r) => `<b>${r}</b> $${rar[r].value.toFixed(0)}`);
+  $("breakdown").innerHTML = parts.length ? parts.join(" · ") : "";
+}
+
+// ------------------------------------------------------------ scanner: single photo
+$("camera-input").onchange = async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  e.target.value = "";
+  $("scan-result").classList.add("hidden");
+  const st = $("scan-status");
+  st.textContent = "Reading card…";
+  st.classList.remove("hidden");
+  try {
+    const resized = await downscale(file);
+    const resp = await fetch("/api/scan", {
+      method: "POST",
+      headers: { "Content-Type": "image/jpeg" },
+      body: resized,
+    });
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error);
+    if (data.match) {
+      st.classList.add("hidden");
+      showMatch(data.match, data.method);
+    } else {
+      st.textContent = data.ocr_guess
+        ? `Couldn't match "${data.ocr_guess}" — try again or search below.`
+        : "Couldn't read the card — try better lighting, or search below.";
+      if (data.ocr_guess) {
+        $("search-input").value = data.ocr_guess;
+        runSearch(data.ocr_guess);
+      }
+    }
+  } catch (err) {
+    st.textContent = "Scan failed: " + err.message;
+  }
+};
+
+// Downscale on-device so uploads over Wi-Fi are fast; OCR doesn't need 12MP.
+async function downscale(file) {
+  const bmp = await createImageBitmap(file).catch(() => null);
+  if (!bmp) return file; // e.g. HEIC in an odd browser — send as-is
+  const maxDim = 1600;
+  const scale = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bmp.width * scale);
+  canvas.height = Math.round(bmp.height * scale);
+  canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
+  return new Promise((res) => canvas.toBlob((b) => res(b || file), "image/jpeg", 0.85));
+}
+
+const METHOD_TEXT = {
+  exact: "exact print ✓",
+  "local-exact": "exact print ✓ · local",
+  number: "exact print ✓",
+  "local-number": "exact print ✓ · local",
+  fuzzy: "name match",
+  "local-name": "name match · local",
+};
+const METHOD_CLASS = {
+  exact: "exact", "local-exact": "exact",
+  number: "exact", "local-number": "exact",
+  fuzzy: "fuzzy", "local-name": "fuzzy",
+};
+
+function showMatch(card, method) {
+  currentCard = card;
+  qty = 1;
+  $("qty-value").textContent = "1";
+  $("result-foil").checked = false;
+  $("result-img").src = imgUrl(card.image_uri || "");
+  $("result-name").innerHTML = "";
+  $("result-name").textContent = card.name;
+  if (method) {
+    const badge = document.createElement("span");
+    badge.className = "method-badge " + (METHOD_CLASS[method] || "fuzzy");
+    badge.textContent = METHOD_TEXT[method] || "match";
+    badge.title = method === "local-exact" || method === "local-name"
+      ? "Matched from the offline database" : "Matched via Scryfall API";
+    $("result-name").appendChild(badge);
+  }
+  $("result-set").textContent =
+    `${card.set_name} (${(card.set_code || "").toUpperCase()}) · #${card.collector_number} · ${card.rarity}`;
+  updatePriceLine();
+  $("scan-result").classList.remove("hidden");
+  if (!liveActive) $("scan-result").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function updatePriceLine() {
+  if (!currentCard) return;
+  const foil = $("result-foil").checked;
+  const p = foil ? currentCard.price_usd_foil : currentCard.price_usd;
+  $("result-price").textContent = p != null ? `$${p.toFixed(2)}${foil ? " (foil)" : ""}` : "no price data";
+}
+$("result-foil").onchange = updatePriceLine;
+$("qty-minus").onclick = () => { qty = Math.max(1, qty - 1); $("qty-value").textContent = qty; };
+$("qty-plus").onclick = () => { qty += 1; $("qty-value").textContent = qty; };
+
+$("add-btn").onclick = async () => {
+  if (!currentCard) return;
+  const resp = await fetch("/api/add", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      card: currentCard,
+      foil: $("result-foil").checked,
+      quantity: qty,
+    }),
+  });
+  const data = await resp.json();
+  if (data.ok) {
+    toast(`Added ${qty}× ${data.name}`);
+    $("scan-result").classList.add("hidden");
+    $("search-results").innerHTML = "";
+    $("search-input").value = "";
+  } else {
+    toast("Error: " + (data.error || "add failed"));
+  }
+};
+
+// ------------------------------------------------------------ live scanning
+$("live-btn").onclick = startLive;
+$("live-stop").onclick = stopLive;
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") stopLive(); });
+
+async function startLive() {
+  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+    toast("Live camera needs the https:// link — scan the Pair Phone QR", 4000);
+    return;
+  }
+  try {
+    liveStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment", width: { ideal: 1920 } },
+      audio: false,
+    });
+  } catch (err) {
+    toast("Camera blocked: " + err.message, 4000);
+    return;
+  }
+  $("scan-video").srcObject = liveStream;
+  $("scan-overlay").classList.remove("hidden");
+  document.body.classList.add("scanning");
+  liveActive = true;
+  lastDetectedId = lastAddedId = null;
+  liveDetected = confirmedId = null;
+  stableCount = noMatchCount = 0;
+  // iOS only allows audio started from a user gesture — prime the beep now.
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+  } catch (e) { /* no audio */ }
+  setupCameraControls();
+  liveLoop();
+}
+
+// Tap-to-focus + zoom. Zoom is the big win for small collector-line text
+// (basic land variations especially); focus points-of-interest is applied
+// where the browser supports it and ignored elsewhere.
+function setupCameraControls() {
+  const track = liveStream.getVideoTracks()[0];
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+
+  const zoomRow = $("zoom-row");
+  if (caps.zoom && caps.zoom.max > caps.zoom.min) {
+    const slider = $("zoom-slider");
+    slider.min = caps.zoom.min;
+    slider.max = Math.min(caps.zoom.max, caps.zoom.min * 5);
+    slider.step = caps.zoom.step || 0.1;
+    slider.value = track.getSettings().zoom || caps.zoom.min;
+    slider.oninput = () =>
+      track.applyConstraints({ advanced: [{ zoom: parseFloat(slider.value) }] })
+        .catch(() => {});
+    zoomRow.classList.remove("hidden");
+  } else {
+    zoomRow.classList.add("hidden");
+  }
+
+  $("scan-video").onclick = async (e) => {
+    const rect = e.target.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    const ring = $("focus-ring");
+    ring.style.left = (e.clientX - rect.left) + "px";
+    ring.style.top = (e.clientY - rect.top) + "px";
+    ring.classList.remove("hidden");
+    clearTimeout(ring._t);
+    ring._t = setTimeout(() => ring.classList.add("hidden"), 900);
+
+    const advanced = [];
+    if (caps.focusMode && caps.focusMode.includes("single-shot"))
+      advanced.push({ focusMode: "single-shot" });
+    if ("pointsOfInterest" in caps)
+      advanced.push({ pointsOfInterest: [{ x, y }] });
+    if (!advanced.length) return; // iOS: continuous AF only — ring still cues user
+    try {
+      await track.applyConstraints({ advanced });
+      setTimeout(() => {
+        if (caps.focusMode && caps.focusMode.includes("continuous"))
+          track.applyConstraints({ advanced: [{ focusMode: "continuous" }] })
+            .catch(() => {});
+      }, 2500);
+    } catch (err) { /* unsupported combination — ignore */ }
+  };
+}
+
+function stopLive() {
+  if (!liveActive) return;
+  liveActive = false;
+  if (liveStream) for (const t of liveStream.getTracks()) t.stop();
+  liveStream = null;
+  $("scan-overlay").classList.add("hidden");
+  document.body.classList.remove("scanning");
+}
+
+function liveLoop() {
+  if (!liveActive) return;
+  captureAndIdentify().finally(() => setTimeout(liveLoop, 400));
+}
+
+async function captureAndIdentify() {
+  if (liveBusy) return;
+  const video = $("scan-video");
+  if (!video.videoWidth) return;
+  liveBusy = true;
+  try {
+    const maxDim = 1400;
+    const scale = Math.min(1, maxDim / Math.max(video.videoWidth, video.videoHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
+    canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.8));
+    if (!blob) return;
+    const data = await fetch("/api/scan", {
+      method: "POST",
+      headers: { "Content-Type": "image/jpeg" },
+      body: blob,
+    }).then((r) => r.json());
+    handleLiveResult(data);
+  } catch (err) {
+    /* transient network/frame errors: keep scanning */
+  } finally {
+    liveBusy = false;
+  }
+}
+
+function handleLiveResult(data) {
+  const overlay = $("scan-overlay-text");
+  if (!liveActive) return;
+  if (data.match) {
+    noMatchCount = 0;
+    const id = data.match.scryfall_id;
+    if (id === lastDetectedId) {
+      stableCount++;
+    } else {
+      lastDetectedId = id;
+      stableCount = 1;
+      confirmedId = null;  // new card → confirmable again
+      showMatch(data.match, data.method);
+    }
+    liveDetected = data.match;
+    updateScanConfirm();
+    const price = data.match.price_usd != null ? ` · $${data.match.price_usd.toFixed(2)}` : "";
+    let note = "";
+    const isExact = !!data.exact;
+    if (isExact) {
+      note = ` — ${(data.match.set_code || "?").toUpperCase()} #${data.match.collector_number} ✓`;
+    } else if ($("auto-add").checked) {
+      note = " — auto-add needs the exact print; zoom in on the bottom number";
+    } else if (/^Basic Land/.test(data.match.type_line || "")) {
+      note = " — zoom for the bottom-left number, or search name + number below";
+    }
+    overlay.textContent = `${data.match.name}${price}${note}`;
+    overlay.classList.add("matched");
+    // auto-add once per stable, newly-seen card — but only when the exact
+    // printing is known (set + collector number), so partial name-only
+    // matches never get added silently.
+    if ($("auto-add").checked && isExact && stableCount === 2 && id !== lastAddedId) {
+      lastAddedId = id;
+      fetch("/api/add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ card: data.match, foil: $("scan-foil").checked, quantity: 1 }),
+      }).then((r) => r.json()).then((res) => {
+        if (res.ok) {
+          confirmedId = id;
+          updateScanConfirm();
+          sessionAdds++;
+          $("session-count").textContent = sessionAdds + " added";
+          beep();
+          toast("Auto-added " + res.name);
+        }
+      });
+    }
+  } else {
+    noMatchCount++;
+    // Two empty frames = card slid out (rig workflow). Re-arm immediately so
+    // consecutive identical cards (e.g. a playset of the same Plains) each
+    // get added.
+    if (noMatchCount >= 2) {
+      lastDetectedId = null;
+      stableCount = 0;
+      lastAddedId = null;
+      liveDetected = null;
+      confirmedId = null;
+      overlay.textContent = "Point at a card…";
+      overlay.classList.remove("matched");
+      updateScanConfirm();
+    }
+  }
+}
+
+// The confirm button in the live scanner adds the currently detected card
+// to the library on the same screen (no need to stop scanning).
+function updateScanConfirm() {
+  const btn = $("scan-confirm");
+  const card = liveDetected;
+  if (!card) { btn.classList.add("hidden"); return; }
+  btn.classList.remove("hidden");
+  const added = confirmedId === card.scryfall_id;
+  btn.disabled = added;
+  btn.classList.toggle("added", added);
+  btn.textContent = added ? "✓ Added — next card?" : "✓ Add to library";
+}
+
+$("scan-confirm").onclick = async () => {
+  const card = liveDetected;
+  if (!card || confirmedId === card.scryfall_id) return;
+  const foil = $("scan-foil").checked;
+  try {
+    const resp = await fetch("/api/add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ card: card, foil: foil, quantity: 1 }),
+    });
+    const res = await resp.json();
+    if (res.ok) {
+      confirmedId = card.scryfall_id;
+      sessionAdds++;
+      $("session-count").textContent = sessionAdds + " added";
+      beep();
+      updateScanConfirm();
+      toast("Added " + res.name + (foil ? " ✦" : ""));
+    } else {
+      toast("Error: " + (res.error || "add failed"));
+    }
+  } catch (err) {
+    toast("Add failed: " + err.message);
+  }
+};
+
+// Short confirmation beep + haptic for heads-down batch scanning.
+function beep() {
+  try {
+    if (navigator.vibrate) navigator.vibrate(30);
+  } catch (e) {}
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.15);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.15);
+  } catch (e) { /* audio unavailable — non-essential */ }
+}
+
+// ------------------------------------------------------------ search
+let searchTimer = null;
+$("search-input").oninput = (e) => {
+  clearTimeout(searchTimer);
+  const q = e.target.value.trim();
+  if (q.length < 3) { $("search-results").innerHTML = ""; return; }
+  searchTimer = setTimeout(() => runSearch(q), 350);
+};
+
+async function runSearch(q) {
+  const resp = await fetch("/api/search?q=" + encodeURIComponent(q));
+  const data = await resp.json();
+  const cards = data.cards || [];
+  const box = $("search-results");
+  box.innerHTML = "";
+  // A single unambiguous hit (e.g. a name + collector number) → show it now.
+  if (cards.length === 1) {
+    showMatch(cards[0]);
+    return;
+  }
+  for (const c of cards) {
+    const div = document.createElement("div");
+    div.className = "search-card";
+    div.innerHTML = `<img loading="lazy" src="${imgUrl(c.image_uri || "")}">` +
+      `<small>${esc(c.set_name)} · #${esc(c.collector_number)} · ` +
+      `${c.price_usd != null ? "$" + c.price_usd.toFixed(2) : "—"}</small>`;
+    div.onclick = () => showMatch(c);
+    box.appendChild(div);
+  }
+}
+
+// ------------------------------------------------------------ library
+async function loadLibrary() {
+  const resp = await fetch("/api/collection");
+  const data = await resp.json();
+  libraryCards = data.cards;
+  updateStats();
+  renderLibrary();
+}
+
+function groupKey(group, c) {
+  if (group === "set") return c.set_name || "Unknown set";
+  if (group === "rarity") return c.rarity || "Other";
+  if (group === "color") {
+    const cols = c.colors || "";
+    if (!cols.length) return "Colorless";
+    if (cols.length > 1) return "Multicolor";
+    return COLOR_NAME[cols] || "Other";
+  }
+  if (group === "letter") {
+    const ch = (c.name || "")[0] || "#";
+    return /[a-z]/i.test(ch) ? ch.toUpperCase() : "#";
+  }
+  return "All";
+}
+
+function groupOrder(group, key) {
+  if (group === "rarity") {
+    const i = RARITY_ORDER.indexOf(key);
+    return i >= 0 ? i : 99;
+  }
+  if (group === "color") {
+    const i = ["White", "Blue", "Black", "Red", "Green", "Multicolor", "Colorless"].indexOf(key);
+    return i >= 0 ? i : 99;
+  }
+  return 0;
+}
+
+function renderLibrary() {
+  const scrollY = window.scrollY;
+  const list = $("library-list");
+  const filter = $("filter-input").value.trim().toLowerCase();
+  const rarity = $("filter-rarity").value;
+  const color = $("filter-color").value;
+  const foilF = $("filter-foil").value;
+
+  let rows = libraryCards.filter((c) => {
+    if (filter && !(c.name.toLowerCase().includes(filter) ||
+                    (c.set_name || "").toLowerCase().includes(filter) ||
+                    (c.type_line || "").toLowerCase().includes(filter))) return false;
+    if (rarity !== "all" && c.rarity !== rarity) return false;
+    const cols = c.colors || "";
+    if (color === "multi" && cols.length < 2) return false;
+    if (color === "colorless" && cols.length > 0) return false;
+    if (color !== "all" && color !== "multi" && color !== "colorless" && !cols.includes(color)) return false;
+    if (foilF === "foil" && !c.foil) return false;
+    if (foilF === "nonfoil" && c.foil) return false;
+    return true;
+  });
+
+  const sort = $("sort-select").value;
+  if (sort === "price-low") rows.sort((a, b) => (a.unit_price ?? 0) - (b.unit_price ?? 0));
+  else if (sort === "price-high") rows.sort((a, b) => (b.unit_price ?? 0) - (a.unit_price ?? 0));
+  else if (sort === "recent") rows.sort((a, b) => (b.added_at || "").localeCompare(a.added_at || ""));
+  else if (sort === "set") rows.sort((a, b) =>
+    (a.set_name || "").localeCompare(b.set_name || "") ||
+    (a.collector_number || "").localeCompare(b.collector_number || "", undefined, { numeric: true }));
+  else if (sort === "rarity") rows.sort((a, b) =>
+    (RARITY_RANK[a.rarity] ?? 9) - (RARITY_RANK[b.rarity] ?? 9) ||
+    (a.name || "").localeCompare(b.name || ""));
+  // "collection": server order, name A→Z
+
+  list.innerHTML = "";
+  if (!rows.length) {
+    list.innerHTML = `<p style="color:var(--dim);text-align:center;margin:34px 0">` +
+      (libraryCards.length ? "No matches — try clearing the filters." : "Library is empty — scan your first card!") + `</p>`;
+    $("load-more").classList.add("hidden");
+    return;
+  }
+
+  const group = $("group-select").value;
+
+  if (group === "none") {
+    const showAll = rows.length <= PAGE;
+    const visible = showAll ? rows : rows.slice(0, pageSize);
+    $("load-more").classList.toggle("hidden", showAll || pageSize >= rows.length);
+    if (viewMode === "grid") renderGrid(visible, list);
+    else renderList(visible, list);
+  } else {
+    $("load-more").classList.add("hidden");
+    const groups = new Map();
+    for (const c of rows) {
+      const key = groupKey(group, c);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(c);
+    }
+    const entries = [...groups.entries()].sort((a, b) => {
+      const o = groupOrder(group, a[0]) - groupOrder(group, b[0]);
+      return o !== 0 ? o : a[0].localeCompare(b[0]);
+    });
+    for (const [key, cards] of entries) {
+      const collapsed = !!collapsedGroups[key];
+      const head = document.createElement("button");
+      head.className = "group-head" + (collapsed ? " collapsed" : "");
+      const val = cards.reduce((s, c) => s + (c.line_value || 0), 0);
+      head.innerHTML = `<span class="chev">${collapsed ? "▸" : "▾"}</span>` +
+        `<b></b><small>${cards.length} · $${val.toFixed(2)}</small>`;
+      head.querySelector("b").textContent = key;
+      head.onclick = () => {
+        collapsedGroups[key] = !collapsed;
+        try { localStorage.setItem("mtg_collapsed", JSON.stringify(collapsedGroups)); } catch (e) {}
+        renderLibrary();
+      };
+      list.appendChild(head);
+      if (!collapsed) {
+        const body = document.createElement("div");
+        body.className = "group-body";
+        if (viewMode === "grid") renderGrid(cards, body);
+        else renderList(cards, body);
+        list.appendChild(body);
+      }
+    }
+  }
+  requestAnimationFrame(() => window.scrollTo(0, scrollY));
+}
+
+function renderGrid(cards, parent) {
+  const grid = document.createElement("div");
+  grid.className = "card-grid";
+  for (const c of cards) {
+    const t = document.createElement("div");
+    t.className = "card-tile";
+    const img = `<div class="tile-img${c.foil ? " tile-foil-edge" : ""}">` +
+      `<img loading="lazy" src="${imgUrl(c.image_uri || "")}" alt="">` +
+      (c.quantity > 1 ? `<span class="tile-qty">×${c.quantity}</span>` : "") +
+      (c.foil ? `<span class="tile-foil">✦</span>` : "") +
+      (c.unit_price != null ? `<span class="tile-price">$${c.unit_price.toFixed(2)}</span>` : "") +
+      `</div><div class="tile-name"></div>`;
+    t.innerHTML = img;
+    t.querySelector(".tile-name").textContent = c.name;
+    t.title = `${c.name} · ${c.quantity}×`;
+    t.onclick = () => openDetail(c);
+    grid.appendChild(t);
+  }
+  parent.appendChild(grid);
+}
+
+function renderList(cards, parent) {
+  for (const c of cards) {
+    const row = document.createElement("div");
+    row.className = "lib-row";
+    const price = c.unit_price != null ? "$" + c.unit_price.toFixed(2) : "—";
+    row.innerHTML =
+      `<img loading="lazy" src="${imgUrl(c.image_uri || "")}" title="Card details">` +
+      `<div class="lib-main"><b></b>` +
+      (c.foil ? `<span class="foil-tag">✦ foil</span>` : "") +
+      `<small></small></div>` +
+      `<div class="lib-price"><b>$${(c.line_value || 0).toFixed(2)}</b><small></small></div>` +
+      `<div class="lib-qty"><button data-d="1">+</button><button data-d="-1">−</button></div>`;
+    row.querySelector(".lib-main b").textContent = c.name;
+    row.querySelector(".lib-main small").textContent =
+      `${c.set_name} · #${c.collector_number} · ${c.rarity}`;
+    row.querySelector(".lib-price small").textContent = `${c.quantity} × ${price}`;
+    row.querySelector("img").onclick = () => openDetail(c);
+    for (const btn of row.querySelectorAll(".lib-qty button")) {
+      btn.onclick = async () => {
+        const newQty = c.quantity + parseInt(btn.dataset.d);
+        if (newQty <= 0 && !confirm(`Remove ${c.name} from library?`)) return;
+        await fetch("/api/update", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: c.id, quantity: newQty }),
+        });
+        loadLibrary();
+      };
+    }
+    parent.appendChild(row);
+  }
+}
+
+function resetPaging() { pageSize = PAGE; }
+$("filter-input").oninput = () => { resetPaging(); renderLibrary(); };
+$("sort-select").onchange = () => { resetPaging(); renderLibrary(); };
+$("group-select").onchange = () => { resetPaging(); renderLibrary(); };
+$("filter-rarity").onchange = () => { resetPaging(); renderLibrary(); };
+$("filter-color").onchange = () => { resetPaging(); renderLibrary(); };
+$("filter-foil").onchange = () => { resetPaging(); renderLibrary(); };
+$("load-more").onclick = () => { pageSize += PAGE; renderLibrary(); };
+
+$("view-toggle").onclick = (e) => {
+  const btn = e.target.closest("button[data-view]");
+  if (!btn) return;
+  viewMode = btn.dataset.view;
+  try { localStorage.setItem("mtg_view", viewMode); } catch (err) {}
+  $("view-toggle").querySelectorAll("button")
+    .forEach((b) => b.classList.toggle("active", b === btn));
+  resetPaging();
+  renderLibrary();
+};
+
+// ------------------------------------------------------------ export / import
+$("export-btn").onclick = async () => {
+  const resp = await fetch("/api/export");
+  if (!resp.ok) { toast("Export failed"); return; }
+  const blob = await resp.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "mtg-collection.csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  toast("Exported library CSV");
+};
+
+$("import-input").onchange = async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  e.target.value = "";
+  const text = await f.text();
+  try {
+    const resp = await fetch("/api/import", {
+      method: "POST",
+      headers: { "Content-Type": "text/csv" },
+      body: text,
+    });
+    const d = await resp.json();
+    if (d.ok) {
+      toast(`Imported: ${d.added} added, ${d.updated} merged` +
+        (d.skipped ? `, ${d.skipped} skipped` : ""));
+      if (d.skipped) console.warn("Import skipped:", d.errors);
+      loadLibrary();
+    } else {
+      toast("Import error: " + (d.error || "failed"));
+    }
+  } catch (err) {
+    toast("Import error: " + err.message);
+  }
+};
+
+// ------------------------------------------------------------ offline database
+async function refreshLocaldb() {
+  const box = $("localdb-box");
+  try {
+    const st = await fetch("/api/localdb").then((r) => r.json());
+    box.classList.remove("hidden");
+    box.classList.toggle("ready", !!st.available);
+    const btn = $("localdb-btn");
+    btn.disabled = !!st.downloading;
+    btn.textContent = st.downloading ? "…" : (st.available ? "Update" : "Download");
+    $("localdb-status").textContent = st.downloading
+      ? (st.phase === "build" ? "Building local index…" : "Downloading…")
+      : st.available
+        ? `${(st.card_count || 0).toLocaleString()} cards offline` +
+          (st.downloaded_at ? ` · ${st.downloaded_at.slice(0, 10)}` : "")
+        : "Not downloaded yet — enables offline scanning";
+    if (st.downloading) updateLocaldbBar(st);
+  } catch (err) {
+    box.classList.add("hidden");
+  }
+}
+
+function updateLocaldbBar(st) {
+  const wrap = $("localdb-bar-wrap");
+  wrap.classList.remove("hidden");
+  const bar = $("localdb-bar");
+  if (st.total_mb) {
+    bar.classList.remove("indeterminate");
+    bar.style.width = Math.min(100, ((st.done_mb || 0) / st.total_mb) * 100) + "%";
+  } else {
+    bar.classList.add("indeterminate");
+  }
+  if (st.phase === "build") $("localdb-status").textContent = "Building local index…";
+  else if (st.total_mb) $("localdb-status").textContent = `Downloading ${st.done_mb}/${st.total_mb} MB`;
+  else if (st.cards) $("localdb-status").textContent = `Downloaded ${st.cards.toLocaleString()} cards…`;
+}
+
+$("localdb-btn").onclick = async () => {
+  const resp = await fetch("/api/localdb/download", { method: "POST" });
+  if (!resp.ok) toast("Download already running", 3000);
+  refreshLocaldb();
+};
+
+// ------------------------------------------------------------ 3D flip card
+// Drag the card in the detail modal to spin it front-to-back. Horizontal
+// drag rotates around Y; vertical drag adds a little tilt. On release it
+// snaps to the nearest face (0° = front, 180° = back).
+let flipRotY = 0, flipRotX = -8, flipDrag = null;
+const flip3d = $("flip3d");
+const flipInner = $("flip3d-inner");
+
+function flipApply() {
+  flipInner.style.transform = `rotateX(${flipRotX}deg) rotateY(${flipRotY}deg)`;
+}
+
+flip3d.addEventListener("pointerdown", (e) => {
+  flipDrag = { x: e.clientX, y: e.clientY, ry: flipRotY, rx: flipRotX };
+  flip3d.setPointerCapture(e.pointerId);
+  flipInner.classList.add("dragging");
+  flipApply();
+});
+flip3d.addEventListener("pointermove", (e) => {
+  if (!flipDrag) return;
+  flipRotY = flipDrag.ry + (e.clientX - flipDrag.x) * 0.9;
+  flipRotX = Math.max(-38, Math.min(38, flipDrag.rx + (e.clientY - flipDrag.y) * 0.35));
+  flipApply();
+});
+function flipRelease() {
+  if (!flipDrag) return;
+  flipDrag = null;
+  flipInner.classList.remove("dragging");
+  flipRotY = Math.round(flipRotY / 180) * 180; // snap to nearest face
+  flipRotX = -8;
+  flipApply();
+}
+flip3d.addEventListener("pointerup", flipRelease);
+flip3d.addEventListener("pointercancel", flipRelease);
+flip3d.addEventListener("dblclick", () => {
+  flipRotY = flipRotY % 360 < 90 || flipRotY % 360 > 270 ? 180 : 0;
+  flipApply();
+});
+
+function flipReset() {
+  flipRotY = 0; flipRotX = -8; flipDrag = null;
+  flipInner.classList.remove("dragging");
+  flipApply();
+}
+
+// ------------------------------------------------------------ card detail modal
+function openDetail(card) {
+  detailCard = card;
+  pendingCard = null;
+  $("detail-img").src = imgUrl(card.image_uri || "");
+  $("detail-back").src = imgUrl(card.back_image_uri) || "/cardback.jpg";
+  flipReset();
+  $("detail-name").textContent = card.name + (card.foil ? " ✦" : "");
+  $("detail-set").textContent =
+    `${card.set_name} (${(card.set_code || "").toUpperCase()}) · #${card.collector_number} · ${card.rarity}`;
+  $("detail-prices").textContent =
+    `Non-foil ${card.price_usd != null ? "$" + card.price_usd.toFixed(2) : "—"}` +
+    ` · Foil ${card.price_usd_foil != null ? "$" + card.price_usd_foil.toFixed(2) : "—"}`;
+  $("detail-foil").checked = !!card.foil;
+  $("detail-qty").textContent = card.quantity;
+  $("detail-scryfall").href = card.scryfall_uri || "#";
+  $("print-search").value = card.name;
+  $("print-results").innerHTML = "";
+  $("detail-history").innerHTML = `<p>Loading price history…</p>`;
+  $("card-modal").classList.remove("hidden");
+  showHistoryChart(card);
+  runPrintSearch(card.name);
+}
+
+$("detail-close").onclick = () => $("card-modal").classList.add("hidden");
+$("card-modal").onclick = (e) => {
+  if (e.target === $("card-modal")) $("card-modal").classList.add("hidden");
+};
+
+async function changeDetailQty(d) {
+  if (!detailCard) return;
+  const newQty = detailCard.quantity + d;
+  if (newQty <= 0 && !confirm(`Remove ${detailCard.name} from library?`)) return;
+  const resp = await fetch("/api/update", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: detailCard.id, quantity: Math.max(0, newQty) }),
+  });
+  if (resp.ok) {
+    detailCard.quantity = Math.max(0, newQty);
+    $("detail-qty").textContent = Math.max(0, newQty);
+    loadLibrary();
+  }
+}
+$("detail-qty-minus").onclick = () => changeDetailQty(-1);
+$("detail-qty-plus").onclick = () => changeDetailQty(1);
+
+$("detail-save").onclick = async () => {
+  if (!detailCard) return;
+  const body = { id: detailCard.id, foil: $("detail-foil").checked };
+  if (pendingCard) body.card = pendingCard;
+  const resp = await fetch("/api/update", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const d = await resp.json();
+  if (d.ok) {
+    toast("Saved" + (pendingCard ? " — printing changed" : ""));
+    $("card-modal").classList.add("hidden");
+    loadLibrary();
+  } else {
+    toast("Error: " + (d.error || "save failed"));
+  }
+};
+
+$("detail-delete").onclick = async () => {
+  if (!detailCard) return;
+  if (!confirm(`Remove ${detailCard.name} from library?`)) return;
+  await fetch("/api/update", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: detailCard.id, delete: true }),
+  });
+  $("card-modal").classList.add("hidden");
+  loadLibrary();
+};
+
+$("print-search").oninput = (e) => {
+  clearTimeout(printTimer);
+  const q = e.target.value.trim();
+  if (q.length < 2) { $("print-results").innerHTML = ""; return; }
+  printTimer = setTimeout(() => runPrintSearch(q), 300);
+};
+
+async function runPrintSearch(q) {
+  const resp = await fetch("/api/search?q=" + encodeURIComponent(q));
+  const data = await resp.json();
+  const box = $("print-results");
+  box.innerHTML = "";
+  for (const c of data.cards || []) {
+    const div = document.createElement("div");
+    div.className = "print-card";
+    if (c.scryfall_id === (detailCard && detailCard.scryfall_id)) div.classList.add("selected");
+    div.innerHTML = `<img loading="lazy" src="${imgUrl(c.image_uri || "")}">` +
+      `<small>${esc(c.set_name)} · #${esc(c.collector_number)} · ${esc(c.rarity)}</small>`;
+    div.onclick = () => {
+      pendingCard = c;
+      box.querySelectorAll(".print-card").forEach((el) => el.classList.remove("selected"));
+      div.classList.add("selected");
+    };
+    box.appendChild(div);
+  }
+}
+
+// ------------------------------------------------------------ price history
+function fmtDate(iso) {
+  const d = new Date(iso);
+  let s = (d.getMonth() + 1) + "/" + d.getDate();
+  if (d.getFullYear() !== new Date().getFullYear()) s += "/" + String(d.getFullYear()).slice(2);
+  return s;
+}
+
+async function showHistoryChart(card) {
+  const resp = await fetch("/api/history/" + card.scryfall_id);
+  const data = await resp.json();
+  const pts = (data.history || [])
+    .map((h) => ({ t: h.recorded_at, v: card.foil ? h.usd_foil : h.usd }))
+    .filter((p) => p.v != null);
+  const box = $("detail-history");
+  if (pts.length < 2) {
+    box.innerHTML = `<p>Not enough price history yet — prices are snapshotted ` +
+      `each time you refresh. Current: ` +
+      (card.unit_price != null ? "$" + card.unit_price.toFixed(2) : "—") + `</p>`;
+  } else {
+    box.innerHTML = sparkline(pts);
+  }
+}
+
+function sparkline(pts) {
+  const W = 460, H = 170, padL = 30, padR = 30, padT = 24, padB = 40;
+  const vs = pts.map((p) => p.v);
+  const min = Math.min(...vs), max = Math.max(...vs), span = max - min || 1;
+  const x = (i) => padL + (i / (pts.length - 1)) * (W - padL - padR);
+  const y = (v) => H - padB - ((v - min) / span) * (H - padT - padB);
+  const path = pts.map((p, i) =>
+    `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
+  const first = pts[0], last = pts[pts.length - 1];
+  const dots = pts.length <= 60 ? pts.map((p, i) =>
+    `<circle cx="${x(i).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="2.5" fill="#6fce8a">` +
+    `<title>${fmtDate(p.t)} · $${p.v.toFixed(2)}</title></circle>`).join("") : "";
+  return `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">
+    <path d="${path}" fill="none" stroke="#6fce8a" stroke-width="2"/>
+    ${dots}
+    <circle cx="${x(pts.length - 1)}" cy="${y(last.v)}" r="4" fill="#6fce8a"><title>now: $${last.v.toFixed(2)}</title></circle>
+    <text x="${padL}" y="16" fill="#98a0b0" font-size="11">high $${max.toFixed(2)}</text>
+    <text x="${padL}" y="${H - padB + 16}" fill="#98a0b0" font-size="11">low $${min.toFixed(2)}</text>
+    <text x="${padL}" y="${H - 8}" fill="#98a0b0" font-size="10">${fmtDate(first.t)}</text>
+    <text x="${W - padR}" y="${H - 8}" fill="#98a0b0" font-size="10" text-anchor="end">${fmtDate(last.t)}</text>
+    <text x="${W - padR}" y="16" fill="#eef0f4" font-size="12" text-anchor="end">now $${last.v.toFixed(2)}</text>
+  </svg>`;
+}
+
+// ------------------------------------------------------------ phone pairing
+$("pair-btn").onclick = async () => {
+  const info = await fetch("/api/info").then((r) => r.json());
+  $("pair-url").textContent = info.url;
+  if (info.qr_available) {
+    $("pair-qr").innerHTML = await fetch("/api/qr").then((r) => r.text());
+  } else {
+    $("pair-qr").innerHTML =
+      `<p style="color:var(--dim)">QR unavailable — open the URL below on your phone.</p>`;
+  }
+  $("pair-modal").classList.remove("hidden");
+};
+$("pair-close").onclick = () => $("pair-modal").classList.add("hidden");
+$("pair-modal").onclick = (e) => {
+  if (e.target === $("pair-modal")) $("pair-modal").classList.add("hidden");
+};
+
+// ------------------------------------------------------------ live events
+let feedTimer = null;
+function showFeed(title, sub, img) {
+  $("live-img").src = imgUrl(img || "");
+  $("live-title").textContent = title;
+  $("live-sub").textContent = sub;
+  $("live-feed").classList.remove("hidden");
+  clearTimeout(feedTimer);
+  feedTimer = setTimeout(() => $("live-feed").classList.add("hidden"), 12000);
+}
+
+function connectEvents() {
+  const es = new EventSource("/api/events");
+  es.onmessage = (e) => {
+    const evt = JSON.parse(e.data);
+    if (evt.type === "scan" && evt.card) {
+      showFeed(`Scanning: ${evt.card.name}`,
+        `${evt.card.set_name} · ` +
+        (evt.card.price_usd != null ? "$" + evt.card.price_usd.toFixed(2) : "no price"),
+        evt.card.image_uri);
+    } else if (evt.type === "add") {
+      showFeed(`Added ${evt.quantity}× ${evt.name}` + (evt.foil ? " ✦" : ""),
+        evt.unit_price != null ? "$" + evt.unit_price.toFixed(2) + " each" : "",
+        evt.image_uri);
+      loadLibrary();
+    } else if (evt.type === "library-changed") {
+      loadLibrary();
+    } else if (evt.type === "price-progress") {
+      const btn = $("refresh-btn");
+      btn.disabled = true;
+      btn.textContent = `↻ ${evt.done}/${evt.total}`;
+    } else if (evt.type === "price-done") {
+      const btn = $("refresh-btn");
+      btn.disabled = false;
+      btn.textContent = "↻ Prices";
+      toast(`Updated ${evt.updated} card prices`);
+      loadLibrary();
+    } else if (evt.type === "localdb-progress") {
+      updateLocaldbBar(evt);
+    } else if (evt.type === "localdb-done") {
+      refreshLocaldb();
+      toast("Offline database ready — " + (evt.card_count || 0).toLocaleString() + " cards");
+    } else if (evt.type === "localdb-error") {
+      refreshLocaldb();
+      toast("Offline DB error: " + evt.error, 4000);
+    }
+  };
+  es.onerror = () => {
+    es.close();
+    setTimeout(connectEvents, 3000); // auto-reconnect
+  };
+}
+
+$("refresh-btn").onclick = async () => {
+  const resp = await fetch("/api/refresh-prices", { method: "POST" });
+  const data = await resp.json();
+  if (!resp.ok) {
+    toast(data.error || "Refresh already running", 3000);
+    return;
+  }
+  if (data.started) {
+    const btn = $("refresh-btn");
+    btn.disabled = true;
+    btn.textContent = data.total ? `↻ 0/${data.total}` : "↻ …";
+  }
+};
+
+connectEvents();
+refreshLocaldb();
+loadLibrary();

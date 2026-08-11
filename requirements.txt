@@ -1,0 +1,3 @@
+# Everything runs on the Python 3.9+ standard library.
+# The one optional extra enables the phone-pairing QR code:
+segno

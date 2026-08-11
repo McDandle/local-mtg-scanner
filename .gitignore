@@ -1,0 +1,28 @@
+# personal library data — never commit a user's collection
+collection.db
+backups/
+img_cache/
+local_cards.json
+localdb_meta.json
+riftbound_cards.csv
+
+# generated TLS cert + marker
+cert.pem
+key.pem
+.cert_ip
+
+# compiled OCR helper (auto-built from ocr.swift on macOS)
+ocr
+
+# vendored/installed deps & caches
+segno/
+__pycache__/
+*.pyc
+
+# misc
+.DS_Store
+.claude/
+*.log
+
+# raw screen recordings (compressed copy lives in docs/)
+mobile library page.gif
