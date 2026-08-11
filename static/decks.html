@@ -1,0 +1,278 @@
+<!doctype html>
+<!-- Deck Builder page for Local MTG Scanner (MIT licensed, see LICENSE). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#12151d">
+<title>MTG Tracker — Deck Builder</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/decks.css">
+</head>
+<body data-page="decks">
+
+<header class="topbar">
+  <a class="brand" href="/" title="Home">
+    <span class="logo" aria-hidden="true">🂠</span>
+    <h1>Deck Builder</h1>
+  </a>
+  <div class="top-actions">
+    <button id="deck-new-btn" class="ghost" title="Create an empty deck">＋ New deck</button>
+    <div class="nav-slot"></div>
+  </div>
+</header>
+
+<main>
+  <!-- hero stats -->
+  <section class="hero">
+    <div class="hero-grid">
+      <div class="stat"><span id="sum-decks">0</span><small>decks</small></div>
+      <div class="stat"><span id="sum-cards">0</span><small>cards in decks</small></div>
+      <div class="stat"><span id="sum-owned">0</span><small>owned</small></div>
+      <div class="stat stat-mvp"><span id="sum-missing">0</span><small>to order</small></div>
+    </div>
+  </section>
+
+  <!-- import -->
+  <section id="imports" class="panel">
+    <h2 class="section-title"><span class="title-icon">🛠</span> Import a deck</h2>
+    <div class="arch-row">
+      <input id="arch-url" type="search" placeholder="Archidekt deck URL or ID — e.g. archidekt.com/decks/1234567"
+             autocomplete="off">
+      <button id="arch-import" class="primary">Import</button>
+    </div>
+    <details class="arch-search">
+      <summary>🔎 Search popular decks on Archidekt</summary>
+      <div class="arch-row">
+        <input id="arch-q" type="search" placeholder="Search decks — commander, archetype, card name…" autocomplete="off">
+        <button id="arch-go" class="ghost">Search</button>
+      </div>
+      <p id="arch-note" class="status hidden"></p>
+      <div id="arch-results" class="arch-results"></div>
+    </details>
+    <details class="precon-search" id="precon-search">
+      <summary>🔎 Search preconstructed decks (official MTGJSON decklists)</summary>
+      <div class="arch-row">
+        <input id="precon-q" type="search" placeholder="Search decks — name, set, or commander (e.g. “chishiro”, “elven council”)…" autocomplete="off">
+        <button id="precon-go" class="ghost">Search</button>
+      </div>
+      <p id="precon-status" class="status"></p>
+      <div id="precon-results" class="arch-results"></div>
+    </details>
+    <p class="import-hint">
+      Or <button id="deck-import-btn" class="linklike">paste a decklist</button>
+      as text (works for any deck, no account needed).
+    </p>
+  </section>
+
+  <!-- your decks -->
+  <section id="decks-panel" class="panel">
+    <div class="lib-head">
+      <h2 class="section-title"><span class="title-icon">🂠</span> Your decks</h2>
+      <div class="lib-head-actions">
+        <button id="planner-btn" class="ghost small" title="Cards needed across all decks">📊 Planner</button>
+        <button id="deck-new-btn2" class="ghost small">＋ New deck</button>
+      </div>
+    </div>
+    <div id="decks-list" class="decks-list"></div>
+  </section>
+</main>
+
+<!-- deck editor -->
+<div id="deck-modal" class="hidden">
+  <div class="modal-box deck-box">
+    <div class="deck-head">
+      <input id="deck-name" type="text" maxlength="80" placeholder="Deck name">
+      <select id="deck-format">
+        <option value="">No format</option>
+        <option>Commander</option>
+        <option>Standard</option>
+        <option>Modern</option>
+        <option>Pioneer</option>
+        <option>Legacy</option>
+        <option>Vintage</option>
+        <option>Pauper</option>
+        <option>Brawl</option>
+        <option>Other</option>
+      </select>
+    </div>
+    <div class="deck-stats">
+      <div class="stat-chip"><b id="deck-stat-total">0</b><small>cards</small></div>
+      <div class="stat-chip own"><b id="deck-stat-owned">0</b><small>owned</small></div>
+      <div class="stat-chip miss"><b id="deck-stat-missing">0</b><small>to order</small></div>
+      <div class="stat-chip money"><b id="deck-stat-cost">$0</b><small>to complete</small></div>
+    </div>
+    <div class="deck-progress"><div id="deck-progress-bar"></div></div>
+    <details class="deck-stats-box">
+      <summary>📊 Deck stats — curve, colors, avg CMC</summary>
+      <div id="deck-stats-body"></div>
+    </details>
+    <div class="deck-actions">
+      <button id="deck-buylist-btn" class="ghost small">🛒 Buy list</button>
+      <button id="deck-view-btn" class="ghost small" title="Archidekt-style deck viewer">🃏 View</button>
+      <button id="deck-legal-btn" class="ghost small" title="Check format legality">⚖ Legal</button>
+      <button id="deck-value-btn" class="ghost small" title="Deck value over time">📈 Value</button>
+      <button id="deck-playtest-btn" class="ghost small" title="Draw hands &amp; odds">🎲 Playtest</button>
+      <button id="deck-import-btn2" class="ghost small">📋 Paste decklist</button>
+      <button id="deck-duplicate-btn" class="ghost small">⧉ Duplicate</button>
+      <button id="deck-add-collection-btn" class="ghost small" title="Add every card to your collection">＋ Add to collection</button>
+      <button id="deck-delete-btn" class="danger small">Delete</button>
+      <button id="deck-close-btn" class="ghost small">Close</button>
+    </div>
+    <div class="deck-add">
+      <div class="deck-add-row">
+        <input id="deck-search" type="search" placeholder="Add cards — try “Plains 189”…">
+        <select id="deck-role" title="Where the card goes">
+          <option value="commander">Commander</option>
+          <option value="main" selected>Main</option>
+          <option value="sideboard">Sideboard</option>
+        </select>
+        <label class="foil-toggle" title="Add as foil"><input type="checkbox" id="deck-foil"> ✦</label>
+      </div>
+      <div id="deck-search-results" class="deck-search-results"></div>
+    </div>
+    <div id="deck-cards" class="deck-cards"></div>
+  </div>
+</div>
+
+<!-- buy list -->
+<div id="buylist-modal" class="hidden">
+  <div class="modal-box buylist-box">
+    <div class="buylist-head">
+      <h3>🛒 Buy list</h3>
+      <div class="buylist-actions">
+        <label class="foil-toggle" title="Use the cheapest printing of each missing card">
+          <input type="checkbox" id="buylist-cheapest"> Cheapest printing
+        </label>
+        <button id="buylist-copy" class="ghost small">Copy text</button>
+        <button id="buylist-csv" class="ghost small">Export CSV</button>
+      </div>
+    </div>
+    <div id="buylist-items" class="buylist-items"></div>
+    <div class="buylist-foot">
+      <span id="buylist-note"></span>
+      <b id="buylist-total">$0.00</b>
+    </div>
+    <button id="buylist-close" class="ghost">Close</button>
+  </div>
+</div>
+
+<!-- paste decklist -->
+<div id="importdeck-modal" class="hidden">
+  <div class="modal-box importdeck-box">
+    <h3>📋 Paste a decklist</h3>
+    <p class="pair-hint">One card per line, e.g. <b>4 Lightning Bolt</b>.
+      <b>SB:</b> lines (or anything after a <b>Sideboard</b> line) go to the
+      sideboard. Matches the newest printing of each name — you can switch
+      printings in the editor afterwards.</p>
+    <textarea id="importdeck-text" rows="8" placeholder="4 Lightning Bolt&#10;1 The One Ring&#10;SB: 3 Duress"></textarea>
+    <div class="detail-actions">
+      <button id="importdeck-go" class="primary">Import to deck</button>
+      <button id="importdeck-collection" class="ghost">＋ Add straight to collection</button>
+      <button id="importdeck-cancel" class="ghost">Cancel</button>
+    </div>
+    <p id="importdeck-status" class="status hidden"></p>
+  </div>
+</div>
+
+<!-- resource planner -->
+<div id="planner-modal" class="hidden">
+  <div class="modal-box planner-box">
+    <div class="buylist-head">
+      <h3>📊 Resource planner</h3>
+      <span id="planner-summary" class="planner-summary"></span>
+    </div>
+    <div id="planner-items" class="planner-items"></div>
+    <button id="planner-close" class="ghost">Close</button>
+  </div>
+</div>
+
+<!-- legality check -->
+<div id="legality-modal" class="hidden">
+  <div class="modal-box legality-box">
+    <div class="buylist-head">
+      <h3>⚖ Legality check</h3>
+      <span id="legality-result" class="legality-result"></span>
+    </div>
+    <div id="legality-issues" class="legality-issues"></div>
+    <button id="legality-close" class="ghost">Close</button>
+  </div>
+</div>
+
+<!-- playtest -->
+<div id="playtest-modal" class="hidden">
+  <div class="modal-box playtest-box">
+    <div class="buylist-head">
+      <h3>🎲 Playtest</h3>
+      <button id="playtest-close" class="ghost small">Close</button>
+    </div>
+    <div class="playtest-row">
+      <button id="playtest-draw" class="primary">Draw opening hand</button>
+      <button id="playtest-redraw" class="ghost">Mulligan (draw again)</button>
+    </div>
+    <div id="playtest-hand" class="playtest-hand"></div>
+    <div class="playtest-calc">
+      <p class="pair-hint">Chance to draw at least one copy of a card by a
+        given turn (hypergeometric).</p>
+      <div class="arch-row">
+        <select id="playtest-card"></select>
+        <select id="playtest-turn">
+          <option value="oh">Opening hand (7)</option>
+          <option value="1">Turn 1</option>
+          <option value="2">Turn 2</option>
+          <option value="3">Turn 3</option>
+          <option value="4">Turn 4</option>
+          <option value="5">Turn 5</option>
+          <option value="6">Turn 6</option>
+          <option value="7" selected>Turn 7</option>
+          <option value="8">Turn 8</option>
+          <option value="9">Turn 9</option>
+          <option value="10">Turn 10</option>
+        </select>
+        <select id="playtest-playdraw">
+          <option value="play">On the play</option>
+          <option value="draw">On the draw</option>
+        </select>
+      </div>
+      <div id="playtest-odds" class="playtest-odds"></div>
+    </div>
+  </div>
+</div>
+
+<!-- deck viewer (Archidekt-style) -->
+<div id="deckview-modal" class="hidden">
+  <div class="modal-box deckview-box">
+    <div class="deckview-head">
+      <h3>🃏 <span id="deckview-title"></span></h3>
+      <div class="seg deckview-toggle" id="deckview-toggle">
+        <button data-v="list" class="active" title="List view">☰ List</button>
+        <button data-v="visual" title="Visual view">▦ Visual</button>
+      </div>
+      <button id="deckview-close" class="ghost small">Close</button>
+    </div>
+    <div id="deckview-stats" class="deckview-stats"></div>
+    <div id="deckview-body" class="deckview-body"></div>
+  </div>
+</div>
+
+<!-- card detail (view-only) is injected by /card-modal.js -->
+
+<!-- deck value over time -->
+<div id="value-modal" class="hidden">
+  <div class="modal-box value-box">
+    <div class="buylist-head">
+      <h3>📈 Deck value</h3>
+      <button id="value-record" class="ghost small">Record now</button>
+      <button id="value-close" class="ghost small">Close</button>
+    </div>
+    <div id="value-chart" class="value-chart"></div>
+    <p id="value-note" class="dim"></p>
+  </div>
+</div>
+
+<div id="toast" class="hidden"></div>
+<script src="/card-modal.js"></script>
+<script src="/nav.js"></script>
+<script src="/decks.js"></script>
+</body>
+</html>

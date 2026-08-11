@@ -26,3 +26,7 @@ __pycache__/
 
 # raw screen recordings (compressed copy lives in docs/)
 mobile library page.gif
+
+# downloaded precon decklist cache (rebuilt on demand by the Deck Builder)
+precon_cache/
+precon_index.json

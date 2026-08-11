@@ -37,6 +37,10 @@ let detailCard = null;
 let pendingCard = null;
 let printTimer = null;
 
+// batch select/edit state
+let batchMode = false;
+const selectedIds = new Set();
+
 // live scanning state
 let liveActive = false;
 let liveStream = null;
@@ -524,15 +528,12 @@ function groupOrder(group, key) {
   return 0;
 }
 
-function renderLibrary() {
-  const scrollY = window.scrollY;
-  const list = $("library-list");
+function filteredLibrary() {
   const filter = $("filter-input").value.trim().toLowerCase();
   const rarity = $("filter-rarity").value;
   const color = $("filter-color").value;
   const foilF = $("filter-foil").value;
-
-  let rows = libraryCards.filter((c) => {
+  return libraryCards.filter((c) => {
     if (filter && !(c.name.toLowerCase().includes(filter) ||
                     (c.set_name || "").toLowerCase().includes(filter) ||
                     (c.type_line || "").toLowerCase().includes(filter))) return false;
@@ -545,6 +546,13 @@ function renderLibrary() {
     if (foilF === "nonfoil" && c.foil) return false;
     return true;
   });
+}
+
+function renderLibrary() {
+  const scrollY = window.scrollY;
+  const list = $("library-list");
+
+  let rows = filteredLibrary();
 
   const sort = $("sort-select").value;
   if (sort === "price-low") rows.sort((a, b) => (a.unit_price ?? 0) - (b.unit_price ?? 0));
@@ -618,7 +626,12 @@ function renderGrid(cards, parent) {
   for (const c of cards) {
     const t = document.createElement("div");
     t.className = "card-tile";
+    t.dataset.cid = c.id;
+    const check = batchMode
+      ? `<input type="checkbox" class="tile-check" ${selectedIds.has(c.id) ? "checked" : ""}>`
+      : "";
     const img = `<div class="tile-img${c.foil ? " tile-foil-edge" : ""}">` +
+      check +
       `<img loading="lazy" src="${imgUrl(c.image_uri || "")}" alt="">` +
       (c.quantity > 1 ? `<span class="tile-qty">×${c.quantity}</span>` : "") +
       (c.foil ? `<span class="tile-foil">✦</span>` : "") +
@@ -627,7 +640,9 @@ function renderGrid(cards, parent) {
     t.innerHTML = img;
     t.querySelector(".tile-name").textContent = c.name;
     t.title = `${c.name} · ${c.quantity}×`;
-    t.onclick = () => openDetail(c);
+    const cb = t.querySelector(".tile-check");
+    if (cb) cb.onclick = (e) => { e.stopPropagation(); toggleSelect(c); };
+    t.onclick = () => { if (batchMode) toggleSelect(c); else openDetail(c); };
     grid.appendChild(t);
   }
   parent.appendChild(grid);
@@ -637,8 +652,13 @@ function renderList(cards, parent) {
   for (const c of cards) {
     const row = document.createElement("div");
     row.className = "lib-row";
+    row.dataset.cid = c.id;
+    const check = batchMode
+      ? `<input type="checkbox" class="row-check" ${selectedIds.has(c.id) ? "checked" : ""}>`
+      : "";
     const price = c.unit_price != null ? "$" + c.unit_price.toFixed(2) : "—";
     row.innerHTML =
+      check +
       `<img loading="lazy" src="${imgUrl(c.image_uri || "")}" title="Card details">` +
       `<div class="lib-main"><b></b>` +
       (c.foil ? `<span class="foil-tag">✦ foil</span>` : "") +
@@ -649,7 +669,14 @@ function renderList(cards, parent) {
     row.querySelector(".lib-main small").textContent =
       `${c.set_name} · #${c.collector_number} · ${c.rarity}`;
     row.querySelector(".lib-price small").textContent = `${c.quantity} × ${price}`;
-    row.querySelector("img").onclick = () => openDetail(c);
+    const cb = row.querySelector(".row-check");
+    if (cb) cb.onclick = (e) => { e.stopPropagation(); toggleSelect(c); };
+    row.querySelector("img").onclick = () => { if (batchMode) toggleSelect(c); else openDetail(c); };
+    row.onclick = (e) => {
+      if (!batchMode) return;
+      if (e.target.closest("button, input, select, a")) return;
+      toggleSelect(c);
+    };
     for (const btn of row.querySelectorAll(".lib-qty button")) {
       btn.onclick = async () => {
         const newQty = c.quantity + parseInt(btn.dataset.d);
@@ -669,11 +696,27 @@ function renderList(cards, parent) {
 function resetPaging() { pageSize = PAGE; }
 $("filter-input").oninput = () => { resetPaging(); renderLibrary(); };
 $("sort-select").onchange = () => { resetPaging(); renderLibrary(); };
-$("group-select").onchange = () => { resetPaging(); renderLibrary(); };
+$("group-select").onchange = () => { resetPaging(); updateCollapseBtns(); renderLibrary(); };
 $("filter-rarity").onchange = () => { resetPaging(); renderLibrary(); };
 $("filter-color").onchange = () => { resetPaging(); renderLibrary(); };
 $("filter-foil").onchange = () => { resetPaging(); renderLibrary(); };
 $("load-more").onclick = () => { pageSize += PAGE; renderLibrary(); };
+
+// Expand / collapse every group at once (library grouping only).
+function updateCollapseBtns() {
+  $("collapse-seg").classList.toggle("hidden", $("group-select").value === "none");
+}
+
+function setAllGroups(collapsed) {
+  const group = $("group-select").value;
+  if (group === "none") return;
+  const keys = new Set(filteredLibrary().map((c) => groupKey(group, c)));
+  for (const k of keys) collapsedGroups[k] = collapsed;
+  try { localStorage.setItem("mtg_collapsed", JSON.stringify(collapsedGroups)); } catch (e) {}
+  renderLibrary();
+}
+$("expand-all").onclick = () => setAllGroups(false);
+$("collapse-all").onclick = () => setAllGroups(true);
 
 $("view-toggle").onclick = (e) => {
   const btn = e.target.closest("button[data-view]");
@@ -684,6 +727,70 @@ $("view-toggle").onclick = (e) => {
     .forEach((b) => b.classList.toggle("active", b === btn));
   resetPaging();
   renderLibrary();
+};
+
+// ------------------------------------------------------------ batch select
+function toggleSelect(c) {
+  if (selectedIds.has(c.id)) selectedIds.delete(c.id);
+  else selectedIds.add(c.id);
+  const el = document.querySelector(`[data-cid="${c.id}"]`);
+  const cb = el && el.querySelector(".tile-check, .row-check");
+  if (cb) cb.checked = selectedIds.has(c.id);
+  updateBatchCount();
+}
+
+function updateBatchCount() {
+  $("batch-count").textContent = selectedIds.size + " selected";
+}
+
+function setBatchMode(on) {
+  batchMode = on;
+  document.body.classList.toggle("batch", on);
+  $("batch-btn").textContent = on ? "✕ Exit" : "☑ Select";
+  $("batch-bar").classList.toggle("hidden", !on);
+  if (!on) selectedIds.clear();
+  updateBatchCount();
+  resetPaging();
+  renderLibrary();
+}
+
+$("batch-btn").onclick = () => setBatchMode(!batchMode);
+$("batch-cancel").onclick = () => setBatchMode(false);
+$("batch-select-all").onclick = () => {
+  filteredLibrary().forEach((c) => selectedIds.add(c.id));
+  renderLibrary();
+  updateBatchCount();
+};
+$("batch-qty").onclick = async () => {
+  if (!selectedIds.size) { toast("Select cards first"); return; }
+  const q = prompt(`Set quantity for ${selectedIds.size} card(s) to:`, "1");
+  if (q == null) return;
+  const n = parseInt(q, 10);
+  if (isNaN(n) || n < 1) { toast("Invalid quantity"); return; }
+  const resp = await fetch("/api/batch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids: [...selectedIds], quantity: n }),
+  });
+  const d = await resp.json();
+  if (d.ok) { toast(`Set ${d.count} card(s) to ×${n}`); }
+  else toast("Error: " + (d.error || "failed"));
+  selectedIds.clear();
+  loadLibrary();
+};
+$("batch-delete").onclick = async () => {
+  if (!selectedIds.size) { toast("Select cards first"); return; }
+  if (!confirm(`Remove ${selectedIds.size} card(s) from library?`)) return;
+  const resp = await fetch("/api/batch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids: [...selectedIds], delete: true }),
+  });
+  const d = await resp.json();
+  if (d.ok) { toast(`Removed ${d.count} card(s)`); }
+  else toast("Error: " + (d.error || "failed"));
+  selectedIds.clear();
+  loadLibrary();
 };
 
 // ------------------------------------------------------------ export / import
@@ -823,18 +930,25 @@ function openDetail(card) {
   flipReset();
   $("detail-name").textContent = card.name + (card.foil ? " ✦" : "");
   $("detail-set").textContent =
-    `${card.set_name} (${(card.set_code || "").toUpperCase()}) · #${card.collector_number} · ${card.rarity}`;
+    `${card.set_name || "?"} (${(card.set_code || "").toUpperCase()}) · #${card.collector_number || "?"} · ${card.rarity || ""}`;
   $("detail-prices").textContent =
     `Non-foil ${card.price_usd != null ? "$" + card.price_usd.toFixed(2) : "—"}` +
     ` · Foil ${card.price_usd_foil != null ? "$" + card.price_usd_foil.toFixed(2) : "—"}`;
   $("detail-foil").checked = !!card.foil;
-  $("detail-qty").textContent = card.quantity;
+  $("detail-qty").textContent = card.quantity || 1;
   $("detail-scryfall").href = card.scryfall_uri || "#";
+  // cards without a library row id (e.g. from the wishlist) are view-only
+  const canEdit = card.id != null;
+  const dc = document.querySelector(".detail-controls");
+  if (dc) dc.classList.toggle("hidden", !canEdit);
+  const saveBtn = $("detail-save");
+  if (saveBtn) saveBtn.classList.toggle("hidden", !canEdit);
   $("print-search").value = card.name;
   $("print-results").innerHTML = "";
   $("detail-history").innerHTML = `<p>Loading price history…</p>`;
   $("card-modal").classList.remove("hidden");
   showHistoryChart(card);
+  showOracle(card);
   runPrintSearch(card.name);
 }
 
@@ -919,6 +1033,26 @@ async function runPrintSearch(q) {
   }
 }
 
+async function showOracle(card) {
+  const body = $("oracle-body");
+  body.innerHTML = `<p class="dim">Loading…</p>`;
+  try {
+    const resp = await fetch("/api/card/" + card.scryfall_id);
+    const d = await resp.json();
+    let html = "";
+    if (d.oracle_text) {
+      html += `<div class="oracle-text">${esc(d.oracle_text)}</div>`;
+    }
+    if (d.rulings && d.rulings.length) {
+      html += `<div class="rulings">` + d.rulings.map((r) =>
+        `<p><b>${esc((r.date || "").slice(0, 10))}</b> ${esc(r.text)}</p>`).join("") + `</div>`;
+    }
+    body.innerHTML = html || `<p class="dim">No oracle text or rulings available.</p>`;
+  } catch (err) {
+    body.innerHTML = `<p class="dim">Couldn't load: ${esc(err.message)}</p>`;
+  }
+}
+
 // ------------------------------------------------------------ price history
 function fmtDate(iso) {
   const d = new Date(iso);
@@ -967,6 +1101,133 @@ function sparkline(pts) {
   </svg>`;
 }
 
+// ------------------------------------------------------------ wishlist
+let wishlistOpen = false;
+let wishlistSearchTimer = null;
+
+$("wishlist-btn").onclick = () => {
+  wishlistOpen = true;
+  $("wishlist-modal").classList.remove("hidden");
+  loadWishlist();
+};
+$("wishlist-close").onclick = () => {
+  wishlistOpen = false;
+  $("wishlist-modal").classList.add("hidden");
+};
+$("wishlist-modal").onclick = (e) => {
+  if (e.target === $("wishlist-modal")) { wishlistOpen = false; $("wishlist-modal").classList.add("hidden"); }
+};
+
+async function loadWishlist() {
+  const data = await fetch("/api/wishlist").then((r) => r.json());
+  const box = $("wishlist-items");
+  const items = data.items || [];
+  updateWishlistBadge(data.alert_count);
+  if (!items.length) {
+    box.innerHTML = `<p style="color:var(--dim);text-align:center;margin:18px 0">` +
+      `Wishlist is empty — search above, or hit 🛒 Wishlist in any card's details.</p>`;
+    return;
+  }
+  box.innerHTML = "";
+  for (const it of items) {
+    const row = document.createElement("div");
+    row.className = "wl-row" + (it.target_price != null && it.price != null && it.price <= it.target_price ? " alert" : "");
+    row.innerHTML =
+      `<img loading="lazy" src="${imgUrl(it.image_uri || "")}">` +
+      `<div class="wl-main"><b>${esc(it.name)}</b>` +
+      `<small>${esc(it.set_name || "?")} · #${esc(it.collector_number || "?")} · ×${it.quantity}</small></div>` +
+      `<div class="wl-price"><small>now</small><b>${it.price != null ? "$" + it.price.toFixed(2) : "—"}</b></div>` +
+      `<div class="wl-target"><small>target</small>` +
+      `<input type="number" step="0.01" min="0" data-id="${it.id}" value="${it.target_price != null ? it.target_price : ""}" placeholder="—"></div>` +
+      (it.target_price != null && it.price != null && it.price <= it.target_price
+        ? `<span class="wl-alert">⚠ target met</span>` : "") +
+      `<button class="wl-rm" data-id="${it.id}" title="Remove">✕</button>`;
+    row.querySelector("img").onclick = () => openDetail({ ...it, id: null, foil: 0 });
+    row.querySelector(".wl-main").onclick = () => openDetail({ ...it, id: null, foil: 0 });
+    box.appendChild(row);
+  }
+  box.querySelectorAll(".wl-rm").forEach((b) => {
+    b.onclick = async () => {
+      await fetch("/api/wishlist/remove", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: parseInt(b.dataset.id, 10) }),
+      });
+      loadWishlist();
+    };
+  });
+  box.querySelectorAll(".wl-target input").forEach((inp) => {
+    inp.onchange = async () => {
+      await fetch("/api/wishlist/update", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: parseInt(inp.dataset.id, 10), target_price: inp.value }),
+      });
+      loadWishlist();
+      toast("Target price saved");
+    };
+  });
+}
+
+async function updateWishlistBadge(count) {
+  const badge = $("wishlist-badge");
+  if (count > 0) {
+    badge.textContent = count;
+    badge.classList.remove("hidden");
+  } else {
+    badge.classList.add("hidden");
+  }
+}
+
+$("wishlist-search").oninput = (e) => {
+  clearTimeout(wishlistSearchTimer);
+  const q = e.target.value.trim();
+  if (q.length < 2) { $("wishlist-results").innerHTML = ""; return; }
+  wishlistSearchTimer = setTimeout(() => runWishlistSearch(q), 300);
+};
+
+async function runWishlistSearch(q) {
+  const data = await fetch("/api/search?q=" + encodeURIComponent(q)).then((r) => r.json());
+  const box = $("wishlist-results");
+  box.innerHTML = "";
+  for (const c of (data.cards || [])) {
+    const div = document.createElement("div");
+    div.className = "search-card";
+    div.innerHTML = `<img loading="lazy" src="${imgUrl(c.image_uri || "")}">` +
+      `<small>${esc(c.set_name)} · #${esc(c.collector_number)} · ` +
+      `${c.price_usd != null ? "$" + c.price_usd.toFixed(2) : "—"}</small>`;
+    div.onclick = async () => {
+      await fetch("/api/wishlist/add", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ card: c }),
+      });
+      toast(`Added ${c.name} to wishlist`);
+      $("wishlist-search").value = "";
+      $("wishlist-results").innerHTML = "";
+      loadWishlist();
+    };
+    box.appendChild(div);
+  }
+}
+
+$("wishlist-refresh").onclick = async () => {
+  const resp = await fetch("/api/wishlist/refresh", { method: "POST" });
+  const d = await resp.json();
+  if (!resp.ok) { toast(d.error || "refresh already running", 3000); return; }
+  const btn = $("wishlist-refresh");
+  if (d.started) {
+    btn.disabled = true;
+    btn.textContent = "↻ …";
+  }
+};
+
+$("detail-wishlist").onclick = async () => {
+  if (!detailCard) return;
+  await fetch("/api/wishlist/add", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ card: detailCard }),
+  });
+  toast(`Added ${detailCard.name} to wishlist`);
+};
+
 // ------------------------------------------------------------ phone pairing
 $("pair-btn").onclick = async () => {
   const info = await fetch("/api/info").then((r) => r.json());
@@ -1009,8 +1270,10 @@ function connectEvents() {
         evt.unit_price != null ? "$" + evt.unit_price.toFixed(2) + " each" : "",
         evt.image_uri);
       loadLibrary();
+      window.dispatchEvent(new CustomEvent("mtg-library-changed"));
     } else if (evt.type === "library-changed") {
       loadLibrary();
+      window.dispatchEvent(new CustomEvent("mtg-library-changed"));
     } else if (evt.type === "price-progress") {
       const btn = $("refresh-btn");
       btn.disabled = true;
@@ -1029,6 +1292,20 @@ function connectEvents() {
     } else if (evt.type === "localdb-error") {
       refreshLocaldb();
       toast("Offline DB error: " + evt.error, 4000);
+    } else if (evt.type === "wishlist-changed") {
+      updateWishlistBadge(0);
+      fetch("/api/wishlist/alerts").then((r) => r.json()).then((d) => updateWishlistBadge(d.count));
+      if (wishlistOpen) loadWishlist();
+    } else if (evt.type === "wishlist-progress") {
+      const btn = $("wishlist-refresh");
+      if (btn) btn.textContent = `↻ ${evt.done}/${evt.total}`;
+    } else if (evt.type === "wishlist-done") {
+      const btn = $("wishlist-refresh");
+      if (btn) { btn.disabled = false; btn.textContent = "↻ Prices"; }
+      toast((evt.alerts && evt.alerts.length)
+        ? "Price alert: " + evt.alerts.join(", ") + " hit your target! 🎉"
+        : "Wishlist prices refreshed");
+      loadWishlist();
     }
   };
   es.onerror = () => {
@@ -1054,3 +1331,7 @@ $("refresh-btn").onclick = async () => {
 connectEvents();
 refreshLocaldb();
 loadLibrary();
+
+// wishlist alert badge
+fetch("/api/wishlist/alerts").then((r) => r.json()).then((d) => updateWishlistBadge(d.count)).catch(() => {});
+updateCollapseBtns();

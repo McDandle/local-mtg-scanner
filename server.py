@@ -47,6 +47,11 @@ try:
     import segno  # QR code for phone pairing (optional: pip install segno)
 except ImportError:
     segno = None
+
+try:
+    import deckbuilder  # optional Deck Builder module (drop-in removable)
+except ImportError:
+    deckbuilder = None
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -143,12 +148,31 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_history_card
                 ON price_history (scryfall_id, recorded_at);
+            CREATE TABLE IF NOT EXISTS wishlist (
+                id INTEGER PRIMARY KEY,
+                scryfall_id TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                set_code TEXT,
+                set_name TEXT,
+                collector_number TEXT,
+                rarity TEXT,
+                image_uri TEXT,
+                price_usd REAL,
+                price_usd_foil REAL,
+                target_price REAL,
+                quantity INTEGER NOT NULL DEFAULT 1,
+                added_at TEXT NOT NULL
+            );
             """
         )
         # migration: 3D card flip shows the back face of double-faced cards
         cols = [r[1] for r in conn.execute("PRAGMA table_info(cards)")]
         if "back_image_uri" not in cols:
             conn.execute("ALTER TABLE cards ADD COLUMN back_image_uri TEXT")
+        if "oracle_text" not in cols:
+            conn.execute("ALTER TABLE cards ADD COLUMN oracle_text TEXT")
+        if deckbuilder is not None:
+            deckbuilder.init_tables(conn)
 
 
 def backup_db():
@@ -180,6 +204,17 @@ def backup_today_exists():
 
 def now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _oracle_text(c):
+    """Oracle text from a raw provider card (joins double-faced faces)."""
+    if not isinstance(c, dict):
+        return ""
+    faces = c.get("card_faces")
+    if faces:
+        parts = [f.get("oracle_text") for f in faces if f.get("oracle_text")]
+        return "\n\n".join(parts)
+    return c.get("oracle_text") or ""
 
 
 # ================================================================ providers
@@ -1213,20 +1248,40 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
         query = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(self.path).query))
         try:
-            if path == "/" or path == "/index.html":
+            if path == "/":
+                self.send_file("home.html", "text/html; charset=utf-8")
+            elif path in ("/index.html", "/library.html"):
                 self.send_file("index.html", "text/html; charset=utf-8")
+            elif path == "/home.js":
+                self.send_file("home.js", "application/javascript")
+            elif path == "/nav.js":
+                self.send_file("nav.js", "application/javascript")
+            elif path == "/card-modal.js":
+                self.send_file("card-modal.js", "application/javascript")
             elif path == "/app.js":
                 self.send_file("app.js", "application/javascript")
             elif path == "/style.css":
                 self.send_file("style.css", "text/css")
             elif path == "/cardback.jpg":
                 self.send_file("cardback.jpg", "image/jpeg")
+            elif path == "/insights.html":
+                self.send_file("insights.html", "text/html; charset=utf-8")
+            elif path == "/insights.js":
+                self.send_file("insights.js", "application/javascript")
+            elif path == "/api/insights":
+                self.api_insights()
+            elif path == "/api/wishlist":
+                self.api_wishlist()
+            elif path == "/api/wishlist/alerts":
+                self.api_wishlist_alerts()
             elif path == "/api/collection":
                 self.api_collection()
             elif path == "/api/search":
                 self.api_search(query.get("q", ""))
             elif path.startswith("/api/history/"):
                 self.api_history(path.split("/")[-1])
+            elif path.startswith("/api/card/"):
+                self.api_card(path.split("/")[-1])
             elif path == "/api/events":
                 self.api_events()
             elif path == "/api/qr":
@@ -1239,6 +1294,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_localdb()
             elif path == "/api/img":
                 api_img(self, query.get("u", ""))
+            elif deckbuilder is not None and deckbuilder.handle_get(self, path, query):
+                pass
             else:
                 self.send_json({"error": "not found"}, 404)
         except BodyTooLarge as e:
@@ -1259,8 +1316,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_import()
             elif path == "/api/refresh-prices":
                 self.api_refresh_prices()
+            elif path == "/api/batch":
+                self.api_batch()
+            elif path == "/api/wishlist/add":
+                self.api_wishlist_add()
+            elif path == "/api/wishlist/update":
+                self.api_wishlist_update()
+            elif path == "/api/wishlist/remove":
+                self.api_wishlist_remove()
+            elif path == "/api/wishlist/refresh":
+                self.api_wishlist_refresh()
             elif path == "/api/localdb/download":
                 self.api_localdb_download()
+            elif deckbuilder is not None and deckbuilder.handle_post(self, path):
+                pass
             else:
                 self.send_json({"error": "not found"}, 404)
         except BodyTooLarge as e:
@@ -1571,6 +1640,341 @@ class Handler(BaseHTTPRequestHandler):
                 "WHERE scryfall_id=? ORDER BY recorded_at", (sid,))]
         self.send_json({"history": rows})
 
+    # -- card details (oracle text + rulings)
+    _rulings_cache = {}
+
+    def api_card(self, sid):
+        text = None
+        with db_lock, db() as conn:
+            row = conn.execute(
+                "SELECT oracle_text FROM cards WHERE scryfall_id=? LIMIT 1",
+                (sid,)).fetchone()
+            if row:
+                text = row["oracle_text"]
+        if not text and P.has_api:
+            try:
+                raw = P.get_card(sid)
+            except Exception:
+                raw = None
+            if raw:
+                text = _oracle_text(raw)
+                if text:
+                    with db_lock, db() as conn:
+                        conn.execute(
+                            "UPDATE cards SET oracle_text=? WHERE scryfall_id=?",
+                            (text, sid))
+        rulings = self.fetch_rulings(sid) if P.id == "mtg" else []
+        self.send_json({"oracle_text": text or "", "rulings": rulings})
+
+    def fetch_rulings(self, sid):
+        now = time.time()
+        hit = self._rulings_cache.get(sid)
+        if hit and now - hit[0] < 3600:
+            return hit[1]
+        try:
+            P._throttle()
+            req = urllib.request.Request(
+                "https://api.scryfall.com/cards/%s/rulings" % sid,
+                headers={"User-Agent": "LocalCardTracker/1.0 "
+                                        "(personal collection tool)"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                d = json.loads(resp.read())
+            rulings = [{"date": r.get("published_at", ""),
+                        "text": r.get("comment", "")}
+                       for r in (d or {}).get("data", [])]
+        except Exception:
+            rulings = []
+        self._rulings_cache[sid] = (time.time(), rulings)
+        return rulings
+
+    # -- batch edit (delete / set quantity)
+    def api_batch(self):
+        body = json.loads(self.read_body())
+        ids = []
+        for x in body.get("ids", []):
+            try:
+                ids.append(int(x))
+            except (TypeError, ValueError):
+                pass
+        if not ids:
+            self.send_json({"error": "no cards selected"}, 400)
+            return
+        marks = ",".join("?" * len(ids))
+        with db_lock, db() as conn:
+            if body.get("delete"):
+                conn.execute("DELETE FROM cards WHERE id IN (%s)" % marks, ids)
+            elif "quantity" in body:
+                q = int(body["quantity"])
+                if q <= 0:
+                    conn.execute("DELETE FROM cards WHERE id IN (%s)" % marks, ids)
+                else:
+                    conn.execute(
+                        "UPDATE cards SET quantity=? WHERE id IN (%s)" % marks,
+                        [q] + ids)
+            else:
+                self.send_json({"error": "unknown action"}, 400)
+                return
+        broadcast({"type": "library-changed"})
+        self.send_json({"ok": True, "count": len(ids)})
+
+    # -- wishlist
+    def api_wishlist(self):
+        with db_lock, db() as conn:
+            rows = [dict(r) for r in conn.execute(
+                "SELECT * FROM wishlist ORDER BY added_at DESC")]
+        alerts = 0
+        for r in rows:
+            price = r["price_usd_foil"] if r.get("foil") else r["price_usd"]
+            r["price"] = price
+            if r.get("target_price") is not None and price is not None \
+                    and price <= r["target_price"]:
+                alerts += 1
+        self.send_json({"items": rows, "alert_count": alerts})
+
+    def api_wishlist_add(self):
+        body = json.loads(self.read_body())
+        card = body.get("card")
+        if not (isinstance(card, dict) and card.get("scryfall_id") and card.get("name")):
+            self.send_json({"error": "card required"}, 400)
+            return
+        try:
+            target = float(body.get("target_price")) if body.get("target_price") not in (None, "") else None
+        except (TypeError, ValueError):
+            target = None
+        try:
+            qty = max(1, int(body.get("quantity", 1)))
+        except (TypeError, ValueError):
+            qty = 1
+        with db_lock, db() as conn:
+            existing = conn.execute(
+                "SELECT id FROM wishlist WHERE scryfall_id=?",
+                (card["scryfall_id"],)).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE wishlist SET quantity=?, target_price=?, price_usd=?, "
+                    "price_usd_foil=?, image_uri=? WHERE id=?",
+                    (qty, target, card.get("price_usd"), card.get("price_usd_foil"),
+                     card.get("image_uri"), existing["id"]))
+            else:
+                conn.execute(
+                    "INSERT INTO wishlist (scryfall_id, name, set_code, set_name, "
+                    "collector_number, rarity, image_uri, price_usd, price_usd_foil, "
+                    "target_price, quantity, added_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (card["scryfall_id"], card["name"], card.get("set_code"),
+                     card.get("set_name"), card.get("collector_number"),
+                     card.get("rarity"), card.get("image_uri"),
+                     card.get("price_usd"), card.get("price_usd_foil"),
+                     target, qty, now_iso()))
+        broadcast({"type": "wishlist-changed"})
+        self.send_json({"ok": True})
+
+    def api_wishlist_update(self):
+        body = json.loads(self.read_body())
+        wl_id = int(body["id"])
+        with db_lock, db() as conn:
+            row = conn.execute("SELECT id FROM wishlist WHERE id=?", (wl_id,)).fetchone()
+            if row is None:
+                self.send_json({"error": "not found"}, 404)
+                return
+            if "target_price" in body:
+                try:
+                    target = float(body["target_price"]) if body["target_price"] not in (None, "") else None
+                except (TypeError, ValueError):
+                    target = None
+                conn.execute("UPDATE wishlist SET target_price=? WHERE id=?",
+                             (target, wl_id))
+            if "quantity" in body:
+                try:
+                    qty = max(1, int(body["quantity"]))
+                except (TypeError, ValueError):
+                    qty = 1
+                conn.execute("UPDATE wishlist SET quantity=? WHERE id=?",
+                             (qty, wl_id))
+        broadcast({"type": "wishlist-changed"})
+        self.send_json({"ok": True})
+
+    def api_wishlist_remove(self):
+        body = json.loads(self.read_body())
+        with db_lock, db() as conn:
+            conn.execute("DELETE FROM wishlist WHERE id=?", (int(body["id"]),))
+        broadcast({"type": "wishlist-changed"})
+        self.send_json({"ok": True})
+
+    def api_wishlist_refresh(self):
+        """Background refresh of wishlist prices; alerts broadcast over SSE."""
+        with self._refresh_lock:
+            if self._refresh_state["active"]:
+                self.send_json({"error": "refresh already running"}, 409)
+                return
+            with db_lock, db() as conn:
+                rows = [dict(r) for r in conn.execute("SELECT * FROM wishlist")]
+            if not rows:
+                self.send_json({"ok": True, "started": False})
+                return
+            self._refresh_state["active"] = True
+
+        def work():
+            try:
+                ts = now_iso()
+                alerts = []
+                for i, r in enumerate(rows, 1):
+                    try:
+                        card = P.get_card(r["scryfall_id"])
+                    except Exception:
+                        card = None
+                    if card:
+                        s = P.summary(card)
+                        price = s.get("price_usd_foil") if r.get("foil") else s.get("price_usd")
+                        with db_lock, db() as conn:
+                            conn.execute(
+                                "UPDATE wishlist SET price_usd=?, price_usd_foil=?, "
+                                "image_uri=? WHERE id=?",
+                                (s.get("price_usd"), s.get("price_usd_foil"),
+                                 s.get("image_uri"), r["id"]))
+                            conn.execute(
+                                "INSERT INTO price_history (scryfall_id, recorded_at, "
+                                "usd, usd_foil) VALUES (?,?,?,?)",
+                                (r["scryfall_id"], ts, s.get("price_usd"),
+                                 s.get("price_usd_foil")))
+                        if (r.get("target_price") is not None and price is not None
+                                and price <= r["target_price"]):
+                            alerts.append(r["name"])
+                    if i % 5 == 0 or i == len(rows):
+                        broadcast({"type": "wishlist-progress", "done": i,
+                                   "total": len(rows)})
+                broadcast({"type": "wishlist-done", "alerts": alerts})
+            finally:
+                with self._refresh_lock:
+                    self._refresh_state["active"] = False
+
+        threading.Thread(target=work, daemon=True).start()
+        self.send_json({"ok": True, "started": True})
+
+    def api_wishlist_alerts(self):
+        with db_lock, db() as conn:
+            rows = [dict(r) for r in conn.execute("SELECT * FROM wishlist")]
+        count = 0
+        for r in rows:
+            price = r["price_usd_foil"] if r.get("foil") else r["price_usd"]
+            if r.get("target_price") is not None and price is not None \
+                    and price <= r["target_price"]:
+                count += 1
+        self.send_json({"count": count})
+
+    # collection insights
+    def api_insights(self):
+        from collections import defaultdict
+
+        def card_value(c):
+            p = c.get("price_usd_foil") if c["foil"] else c.get("price_usd")
+            return (p or 0) * c["quantity"]
+
+        with db_lock, db() as conn:
+            cards = [dict(r) for r in conn.execute("SELECT * FROM cards")]
+            hist = [dict(r) for r in conn.execute(
+                "SELECT recorded_at, scryfall_id, usd, usd_foil FROM price_history")]
+            try:
+                wl_count = conn.execute("SELECT COUNT(*) FROM wishlist").fetchone()[0]
+            except Exception:
+                wl_count = 0
+        # value over time: for each card, last price per day × current qty
+        by_sid = defaultdict(list)
+        for r in hist:
+            by_sid[r["scryfall_id"]].append(r)
+        for v in by_sid.values():
+            v.sort(key=lambda r: r["recorded_at"])
+        value_by_date = defaultdict(float)
+        for c in cards:
+            use = "usd_foil" if c["foil"] else "usd"
+            last = {}
+            for r in by_sid.get(c["scryfall_id"], []):
+                last[r["recorded_at"][:10]] = r.get(use)
+            for d, p in last.items():
+                if p is not None:
+                    value_by_date[d] += p * c["quantity"]
+        value_history = [{"date": d, "value": round(v, 2)}
+                         for d, v in sorted(value_by_date.items())]
+
+        total_value = round(sum(card_value(c) for c in cards), 2)
+        total_cards = sum(c["quantity"] for c in cards)
+
+        rarity = defaultdict(lambda: {"count": 0, "value": 0.0})
+        colors = defaultdict(int)
+        sets = defaultdict(lambda: {"count": 0, "value": 0.0})
+        for c in cards:
+            v = card_value(c)
+            k = c.get("rarity") or "?"
+            rarity[k]["count"] += c["quantity"]
+            rarity[k]["value"] += v
+            cols = c.get("colors") or ""
+            if len(cols) > 1:
+                colors["multicolor"] += c["quantity"]
+            elif cols:
+                colors[cols] += c["quantity"]
+            else:
+                colors["colorless"] += c["quantity"]
+            sk = c.get("set_name") or c.get("set_code") or "?"
+            sets[sk]["count"] += c["quantity"]
+            sets[sk]["value"] += v
+
+        top_cards = sorted(cards, key=card_value, reverse=True)[:10]
+        for c in top_cards:
+            c["line_value"] = round(card_value(c), 2)
+        recent = sorted(cards, key=lambda c: c.get("added_at") or "", reverse=True)[:10]
+
+        # set completion vs offline index (when available)
+        set_progress = []
+        load_local()
+        if _local_cards:
+            set_totals = defaultdict(set)
+            for c in _local_cards:
+                set_totals[(c.get("set_code") or "").lower()].add(
+                    str(c.get("collector_number") or ""))
+            owned = defaultdict(set)
+            for c in cards:
+                owned[(c.get("set_code") or "").lower()].add(
+                    str(c.get("collector_number") or ""))
+            by_set = defaultdict(lambda: {"count": 0, "value": 0.0})
+            name_of_code = {}
+            for c in cards:
+                code = (c.get("set_code") or "").lower()
+                v = card_value(c)
+                by_set[code]["count"] += c["quantity"]
+                by_set[code]["value"] += v
+                name_of_code[code] = c.get("set_name") or code
+            for code, info in sorted(by_set.items(), key=lambda x: -x[1]["value"])[:14]:
+                total = len(set_totals.get(code, set()))
+                own = len(owned.get(code, set()))
+                if total:
+                    set_progress.append({"name": name_of_code.get(code, code),
+                                         "owned": own, "total": total,
+                                         "pct": round(own / total * 100, 1)})
+
+        # most-played commanders (deck extension present)
+        commanders = []
+        if deckbuilder is not None:
+            try:
+                with db_lock, db() as conn:
+                    rows = [dict(r) for r in conn.execute(
+                        "SELECT name, SUM(quantity) AS q FROM deck_cards "
+                        "WHERE role='commander' GROUP BY name ORDER BY q DESC LIMIT 8")]
+                commanders = [{"name": r["name"], "qty": r["q"]} for r in rows]
+            except Exception:
+                commanders = []
+
+        self.send_json({
+            "total_value": total_value, "total_cards": total_cards,
+            "wishlist_count": wl_count, "deck_count": len(commanders),
+            "value_history": value_history,
+            "rarity": [{"rarity": k, "count": v["count"], "value": round(v["value"], 2)}
+                        for k, v in sorted(rarity.items())],
+            "colors": sorted(colors.items()),
+            "top_sets": [{"name": k, "count": v["count"], "value": round(v["value"], 2)}
+                          for k, v in sorted(sets.items(), key=lambda x: -x[1]["value"])[:10]],
+            "top_cards": top_cards, "recent": recent,
+            "set_progress": set_progress, "commanders": commanders,
+        })
+
     # -- export / import
     def api_export(self):
         with db_lock, db() as conn:
@@ -1730,11 +2134,10 @@ TLS_AVAILABLE = True  # set for real in __main__
 
 
 def phone_url():
-    """URL the phone should open: HTTPS when available (live camera needs a
-    secure context), plain HTTP otherwise (photo scanning still works)."""
+    """URL the phone should open — lands straight on the library/scanner page."""
     if TLS_AVAILABLE:
-        return f"https://{lan_ip()}:{TLS_PORT}"
-    return f"http://{lan_ip()}:{PORT}"
+        return f"https://{lan_ip()}:{TLS_PORT}/library.html"
+    return f"http://{lan_ip()}:{PORT}/library.html"
 
 
 def lan_ip():
@@ -1812,12 +2215,12 @@ if __name__ == "__main__":
 
     server = TrackerHTTPServer(("0.0.0.0", PORT), Handler)
     print("Card tracker running (%s, OCR: %s):" % (P.label, backend))
-    print(f"  This computer: http://localhost:{PORT}")
+    print(f"  This computer: http://localhost:{PORT}/")
     if tls_ok:
-        print(f"  Phone:         https://{ip}:{TLS_PORT}  (same Wi-Fi; accept "
+        print(f"  Phone:         {phone_url()}  (same Wi-Fi; accept "
               "the cert warning once — needed for live camera)")
     else:
-        print(f"  Phone:         http://{ip}:{PORT}  (photo scanning only — "
+        print(f"  Phone:         {phone_url()}  (photo scanning only — "
               "install openssl for live camera)")
     if backend == "none":
         print("  WARNING: no OCR backend found — scanning disabled. Install "

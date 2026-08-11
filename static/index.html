@@ -10,13 +10,15 @@
 <body>
 
 <header class="topbar">
-  <div class="brand">
+  <a class="brand" href="/" title="Home">
     <span class="logo" aria-hidden="true">✦</span>
     <h1>MTG Tracker</h1>
-  </div>
+  </a>
   <div class="top-actions">
-    <button id="pair-btn" class="ghost" title="Pair your phone as a scanner">📱 Pair</button>
-    <button id="refresh-btn" class="ghost" title="Fetch fresh prices">↻ Prices</button>
+    <button id="wishlist-btn" class="ghost" title="Cards you want to buy">🛒 <span class="btn-label">Wishlist</span><span id="wishlist-badge" class="nav-badge hidden"></span></button>
+    <button id="pair-btn" class="ghost" title="Pair your phone as a scanner">📱 <span class="btn-label">Pair</span></button>
+    <button id="refresh-btn" class="ghost" title="Fetch fresh prices">↻ <span class="btn-label">Prices</span></button>
+    <div class="nav-slot"></div>
   </div>
 </header>
 
@@ -101,6 +103,7 @@
     <div class="lib-head">
       <h2 class="section-title"><span class="title-icon">🗂</span> Library</h2>
       <div class="lib-head-actions">
+        <button id="batch-btn" class="ghost small" title="Select multiple cards to edit">☑ Select</button>
         <button id="export-btn" class="ghost small" title="Download the library as CSV">⬇ Export</button>
         <label id="import-label" class="ghost small" title="Import cards from a CSV file">
           ⬆ Import<input id="import-input" type="file" accept=".csv,text/csv">
@@ -130,6 +133,10 @@
         <option value="letter">Group: A–Z</option>
         <option value="none">No grouping</option>
       </select>
+      <div class="seg collapse-seg hidden" id="collapse-seg">
+        <button id="expand-all" title="Expand all groups">▾ Expand</button>
+        <button id="collapse-all" title="Collapse all groups">▸ Collapse</button>
+      </div>
       <select id="filter-rarity">
         <option value="all">Any rarity</option>
         <option value="common">Common</option>
@@ -158,6 +165,15 @@
     <button id="load-more" class="ghost load-more hidden">Load more</button>
   </section>
 </main>
+
+<!-- batch edit bar -->
+<div id="batch-bar" class="hidden">
+  <span id="batch-count">0 selected</span>
+  <button id="batch-select-all" class="ghost small">Select all</button>
+  <button id="batch-qty" class="ghost small">Set qty…</button>
+  <button id="batch-delete" class="danger small">Delete</button>
+  <button id="batch-cancel" class="ghost small">Done</button>
+</div>
 
 <!-- fullscreen live scanner -->
 <div id="scan-overlay" class="hidden">
@@ -219,13 +235,14 @@
       <p id="detail-prices" class="price"></p>
       <a id="detail-scryfall" target="_blank" rel="noopener">View on Scryfall ↗</a>
     </div>
-    <div class="detail-controls">
+    <div class="detail-controls" id="detail-controls">
       <label class="foil-toggle" title="Save applies the change"><input type="checkbox" id="detail-foil"> Foil</label>
       <div class="qty-picker">
         <button id="detail-qty-minus">−</button>
         <span id="detail-qty">1</span>
         <button id="detail-qty-plus">+</button>
       </div>
+      <button id="detail-wishlist" class="ghost" title="Add this card to your wishlist">🛒 Wishlist</button>
       <button id="detail-delete" class="danger">Delete</button>
     </div>
     <details class="printing-box">
@@ -234,6 +251,10 @@
       <div id="print-results"></div>
     </details>
     <div id="detail-history"></div>
+    <details class="oracle-box">
+      <summary>Oracle text &amp; rulings</summary>
+      <div id="oracle-body"><p class="dim">Loading…</p></div>
+    </details>
     <div class="detail-actions">
       <button id="detail-save" class="primary">Save changes</button>
       <button id="detail-close" class="ghost">Close</button>
@@ -241,7 +262,27 @@
   </div>
 </div>
 
+<!-- wishlist -->
+<div id="wishlist-modal" class="hidden">
+  <div class="modal-box wishlist-box">
+    <div class="wl-head">
+      <h3>🛒 Wishlist</h3>
+      <div class="lib-head-actions">
+        <button id="wishlist-refresh" class="ghost small" title="Fetch fresh prices">↻ Prices</button>
+        <button id="wishlist-close" class="ghost small">Close</button>
+      </div>
+    </div>
+    <div class="wl-add">
+      <input id="wishlist-search" type="search" placeholder="Add a card you want to buy…">
+      <div id="wishlist-results"></div>
+    </div>
+    <p id="wishlist-status" class="status hidden"></p>
+    <div id="wishlist-items"></div>
+  </div>
+</div>
+
 <div id="toast" class="hidden"></div>
 <script src="/app.js"></script>
+<script src="/nav.js"></script>
 </body>
 </html>
