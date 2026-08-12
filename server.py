@@ -1260,6 +1260,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_file("card-modal.js", "application/javascript")
             elif path == "/app.js":
                 self.send_file("app.js", "application/javascript")
+            elif path == "/icons.js":
+                self.send_file("icons.js", "application/javascript")
             elif path == "/style.css":
                 self.send_file("style.css", "text/css")
             elif path == "/cardback.jpg":
@@ -1324,6 +1326,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_wishlist_update()
             elif path == "/api/wishlist/remove":
                 self.api_wishlist_remove()
+            elif path == "/api/wishlist/bought":
+                self.api_wishlist_bought()
             elif path == "/api/wishlist/refresh":
                 self.api_wishlist_refresh()
             elif path == "/api/localdb/download":
@@ -1478,6 +1482,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             s = P.summary(card)
         ts = now_iso()
+        wl_match = None
         with db_lock, db() as conn:
             existing = conn.execute(
                 "SELECT id, quantity FROM cards WHERE scryfall_id=? AND foil=?",
@@ -1504,10 +1509,19 @@ class Handler(BaseHTTPRequestHandler):
             conn.execute(
                 "INSERT INTO price_history (scryfall_id, recorded_at, usd, usd_foil) "
                 "VALUES (?,?,?,?)", (sid, ts, s["price_usd"], s["price_usd_foil"]))
+            wl = conn.execute(
+                "SELECT id, name, quantity FROM wishlist WHERE scryfall_id=?",
+                (sid,)).fetchone()
+            if wl:
+                wl_match = {"id": wl["id"], "name": wl["name"],
+                            "qty": wl["quantity"]}
         broadcast({"type": "add", "name": s["name"], "quantity": qty,
                    "foil": bool(foil), "image_uri": s["image_uri"],
                    "unit_price": s["price_usd_foil"] if foil else s["price_usd"]})
-        self.send_json({"ok": True, "name": s["name"]})
+        resp = {"ok": True, "name": s["name"]}
+        if wl_match:
+            resp["wishlist_match"] = wl_match
+        self.send_json(resp)
 
     def api_update(self):
         """Quantity, foil flag, printing replacement, or delete."""
@@ -1799,6 +1813,86 @@ class Handler(BaseHTTPRequestHandler):
             conn.execute("DELETE FROM wishlist WHERE id=?", (int(body["id"]),))
         broadcast({"type": "wishlist-changed"})
         self.send_json({"ok": True})
+
+    def api_wishlist_bought(self):
+        """Move wishlist item(s) into the collection (mark as bought)."""
+        body = json.loads(self.read_body())
+        wl_id = int(body["id"])
+        to_collection = bool(body.get("to_collection", True))
+        with db_lock, db() as conn:
+            row = conn.execute(
+                "SELECT * FROM wishlist WHERE id=?", (wl_id,)).fetchone()
+            if row is None:
+                self.send_json({"error": "not found"}, 404)
+                return
+            if "qty" in body:
+                try:
+                    qty = max(1, int(body.get("qty") or 0))
+                except (TypeError, ValueError):
+                    qty = row["quantity"]
+            else:
+                qty = row["quantity"]
+            qty = min(qty, row["quantity"])
+            if to_collection:
+                card = fetch_card(row["scryfall_id"])
+                s = None
+                if isinstance(card, dict):
+                    try:
+                        s = P.summary(card)
+                    except Exception:
+                        s = None
+                if not s or not s.get("name"):
+                    s = {"scryfall_id": row["scryfall_id"],
+                         "name": row["name"], "set_code": row["set_code"],
+                         "set_name": row["set_name"],
+                         "collector_number": row["collector_number"],
+                         "rarity": row["rarity"], "mana_cost": "",
+                         "type_line": "", "colors": "",
+                         "image_uri": row["image_uri"], "scryfall_uri": "",
+                         "price_usd": row["price_usd"],
+                         "price_usd_foil": row["price_usd_foil"],
+                         "back_image_uri": None}
+                ts = now_iso()
+                existing = conn.execute(
+                    "SELECT id, quantity FROM cards WHERE scryfall_id=? AND foil=?",
+                    (row["scryfall_id"], 0)).fetchone()
+                if existing:
+                    conn.execute("UPDATE cards SET quantity=?, price_usd=?, "
+                                 "price_usd_foil=?, price_updated_at=?, back_image_uri=? "
+                                 "WHERE id=?",
+                                 (existing["quantity"] + qty, s["price_usd"],
+                                  s["price_usd_foil"], ts, s.get("back_image_uri"),
+                                  existing["id"]))
+                else:
+                    conn.execute(
+                        """INSERT INTO cards (scryfall_id, name, set_code, set_name,
+                           collector_number, rarity, mana_cost, type_line, colors,
+                           image_uri, scryfall_uri, back_image_uri, foil, quantity,
+                           price_usd, price_usd_foil, price_updated_at, added_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (row["scryfall_id"], s["name"], s["set_code"],
+                         s["set_name"], s["collector_number"], s["rarity"],
+                         s["mana_cost"], s["type_line"], s["colors"],
+                         s["image_uri"], s["scryfall_uri"],
+                         s.get("back_image_uri"), 0, qty, s["price_usd"],
+                         s["price_usd_foil"], ts, ts))
+                conn.execute(
+                    "INSERT INTO price_history (scryfall_id, recorded_at, usd, usd_foil) "
+                    "VALUES (?,?,?,?)", (row["scryfall_id"], ts, s["price_usd"],
+                                          s["price_usd_foil"]))
+            new_qty = row["quantity"] - qty
+            if new_qty <= 0:
+                conn.execute("DELETE FROM wishlist WHERE id=?", (wl_id,))
+                removed = True
+            else:
+                conn.execute("UPDATE wishlist SET quantity=? WHERE id=?",
+                             (new_qty, wl_id))
+                removed = False
+        broadcast({"type": "wishlist-changed"})
+        if to_collection:
+            broadcast({"type": "library-changed"})
+        self.send_json({"ok": True, "name": row["name"], "qty": qty,
+                        "removed": bool(removed)})
 
     def api_wishlist_refresh(self):
         """Background refresh of wishlist prices; alerts broadcast over SSE."""

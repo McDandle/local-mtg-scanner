@@ -18,22 +18,23 @@
   btn.className = "ghost";
   btn.title = "Menu";
   btn.setAttribute("aria-label", "Menu");
-  btn.textContent = "☰";
+  btn.innerHTML = '<svg class="ic" aria-hidden="true"><use href="#i-menu"/></svg>';
 
   const menu = document.createElement("div");
   menu.id = "nav-menu";
   menu.className = "nav-menu hidden";
 
   const items = [
-    { href: "/", page: "index.html", label: "🏠 Home" },
-    { href: "/library.html", page: "library.html", label: "🗂 Library" },
-    { href: "/insights.html", page: "insights.html", label: "📈 Insights" },
-    { href: "/decks.html", page: "decks.html", label: "🂠 Decks" },
+    { href: "/", page: "index.html", label: "Home", icon: "home" },
+    { href: "/library.html", page: "library.html", label: "Library", icon: "cards" },
+    { href: "/insights.html", page: "insights.html", label: "Insights", icon: "chart" },
+    { href: "/decks.html", page: "decks.html", label: "Decks", icon: "decks" },
   ];
   for (const it of items) {
     const a = document.createElement("a");
     a.href = it.href;
-    a.textContent = it.label;
+    a.innerHTML =
+      `<svg class="ic" aria-hidden="true"><use href="#i-${it.icon}"/></svg> ${it.label}`;
     if (it.page === cur) a.classList.add("active");
     if (it.page === "decks.html") a.id = "nav-decks";
     menu.appendChild(a);

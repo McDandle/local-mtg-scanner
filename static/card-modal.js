@@ -172,7 +172,8 @@
     inject();
     modal.querySelector("#detail-img").src = imgUrl(card.image_uri || "");
     modal.querySelector("#detail-back").src = imgUrl(card.back_image_uri) || "/cardback.jpg";
-    modal.querySelector("#detail-name").textContent = card.name + (card.foil ? " ✦" : "");
+    modal.querySelector("#detail-name").innerHTML =
+      esc(card.name) + (card.foil ? " " + icon("foil") : "");
     modal.querySelector("#detail-set").textContent =
       `${card.set_name || "?"} (${(card.set_code || "").toUpperCase()}) · #${card.collector_number || "?"} · ${card.rarity || ""}`;
     const np = card.price_usd != null ? card.price_usd : (card.foil ? null : card.unit_price);

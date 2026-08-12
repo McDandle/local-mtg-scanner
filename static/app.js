@@ -22,6 +22,13 @@ function toast(msg, ms = 2400) {
   t._timer = setTimeout(() => t.classList.add("hidden"), ms);
 }
 
+// update a button label without clobbering its svg icon
+function setBtnLabel(btn, text) {
+  const span = btn && btn.querySelector(".btn-label");
+  if (span) span.textContent = text;
+  else if (btn) btn.textContent = text;
+}
+
 // ------------------------------------------------------------ state
 let libraryCards = [];
 const PAGE = 100;
@@ -189,6 +196,11 @@ $("result-foil").onchange = updatePriceLine;
 $("qty-minus").onclick = () => { qty = Math.max(1, qty - 1); $("qty-value").textContent = qty; };
 $("qty-plus").onclick = () => { qty += 1; $("qty-value").textContent = qty; };
 
+$("result-wishlist").onclick = () => {
+  if (!currentCard) return;
+  addWishlist(currentCard);
+};
+
 $("add-btn").onclick = async () => {
   if (!currentCard) return;
   const resp = await fetch("/api/add", {
@@ -206,10 +218,28 @@ $("add-btn").onclick = async () => {
     $("scan-result").classList.add("hidden");
     $("search-results").innerHTML = "";
     $("search-input").value = "";
+    maybeWishlistBought(data, qty);
   } else {
     toast("Error: " + (data.error || "add failed"));
   }
 };
+
+// If the card just added was on the wishlist, offer to mark it bought
+// (decrements the wishlist entry without double-adding to the library).
+async function maybeWishlistBought(res, qty) {
+  if (!res || !res.ok || !res.wishlist_match) return;
+  const wm = res.wishlist_match;
+  if (!confirm(`"${wm.name}" was on your wishlist — mark it as bought? (removes it from the wishlist)`)) return;
+  const resp = await fetch("/api/wishlist/bought", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: wm.id, qty: qty || 1, to_collection: false }),
+  });
+  const d = await resp.json();
+  if (d.ok) {
+    toast(`Removed ${d.name} from your wishlist`);
+    if (wishlistOpen) loadWishlist();
+  }
+}
 
 // ------------------------------------------------------------ live scanning
 $("live-btn").onclick = startLive;
@@ -382,6 +412,7 @@ function handleLiveResult(data) {
           $("session-count").textContent = sessionAdds + " added";
           beep();
           toast("Auto-added " + res.name);
+          maybeWishlistBought(res, 1);
         }
       });
     }
@@ -413,7 +444,7 @@ function updateScanConfirm() {
   const added = confirmedId === card.scryfall_id;
   btn.disabled = added;
   btn.classList.toggle("added", added);
-  btn.textContent = added ? "✓ Added — next card?" : "✓ Add to library";
+  btn.querySelector(".scan-label").textContent = added ? "Added — next card?" : "Add to library";
 }
 
 $("scan-confirm").onclick = async () => {
@@ -434,6 +465,7 @@ $("scan-confirm").onclick = async () => {
       beep();
       updateScanConfirm();
       toast("Added " + res.name + (foil ? " ✦" : ""));
+      maybeWishlistBought(res, 1);
     } else {
       toast("Error: " + (res.error || "add failed"));
     }
@@ -484,10 +516,29 @@ async function runSearch(q) {
     const div = document.createElement("div");
     div.className = "search-card";
     div.innerHTML = `<img loading="lazy" src="${imgUrl(c.image_uri || "")}">` +
+      `<button class="search-wl" title="Add to wishlist">${icon("cart")}</button>` +
       `<small>${esc(c.set_name)} · #${esc(c.collector_number)} · ` +
       `${c.price_usd != null ? "$" + c.price_usd.toFixed(2) : "—"}</small>`;
     div.onclick = () => showMatch(c);
+    div.querySelector(".search-wl").onclick = (e) => {
+      e.stopPropagation();
+      addWishlist(c, e.currentTarget);
+    };
     box.appendChild(div);
+  }
+}
+
+// add a card to the wishlist (server dedupes by printing)
+async function addWishlist(card, btn) {
+  try {
+    await fetch("/api/wishlist/add", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ card }),
+    });
+    toast(`Added ${card.name} to wishlist`);
+    if (btn) { btn.classList.add("added"); btn.title = "On wishlist"; }
+  } catch (err) {
+    toast("Wishlist failed: " + err.message);
   }
 }
 
@@ -634,7 +685,7 @@ function renderGrid(cards, parent) {
       check +
       `<img loading="lazy" src="${imgUrl(c.image_uri || "")}" alt="">` +
       (c.quantity > 1 ? `<span class="tile-qty">×${c.quantity}</span>` : "") +
-      (c.foil ? `<span class="tile-foil">✦</span>` : "") +
+      (c.foil ? `<span class="tile-foil">${icon("foil")}</span>` : "") +
       (c.unit_price != null ? `<span class="tile-price">$${c.unit_price.toFixed(2)}</span>` : "") +
       `</div><div class="tile-name"></div>`;
     t.innerHTML = img;
@@ -661,7 +712,7 @@ function renderList(cards, parent) {
       check +
       `<img loading="lazy" src="${imgUrl(c.image_uri || "")}" title="Card details">` +
       `<div class="lib-main"><b></b>` +
-      (c.foil ? `<span class="foil-tag">✦ foil</span>` : "") +
+      (c.foil ? `<span class="foil-tag">${icon("foil")} foil</span>` : "") +
       `<small></small></div>` +
       `<div class="lib-price"><b>$${(c.line_value || 0).toFixed(2)}</b><small></small></div>` +
       `<div class="lib-qty"><button data-d="1">+</button><button data-d="-1">−</button></div>`;
@@ -746,7 +797,7 @@ function updateBatchCount() {
 function setBatchMode(on) {
   batchMode = on;
   document.body.classList.toggle("batch", on);
-  $("batch-btn").textContent = on ? "✕ Exit" : "☑ Select";
+  setBtnLabel($("batch-btn"), on ? "Exit" : "Select");
   $("batch-bar").classList.toggle("hidden", !on);
   if (!on) selectedIds.clear();
   updateBatchCount();
@@ -836,22 +887,38 @@ $("import-input").onchange = async (e) => {
 // ------------------------------------------------------------ offline database
 async function refreshLocaldb() {
   const box = $("localdb-box");
+  const chip = $("offline-chip");
   try {
     const st = await fetch("/api/localdb").then((r) => r.json());
-    box.classList.remove("hidden");
-    box.classList.toggle("ready", !!st.available);
     const btn = $("localdb-btn");
     btn.disabled = !!st.downloading;
-    btn.textContent = st.downloading ? "…" : (st.available ? "Update" : "Download");
-    $("localdb-status").textContent = st.downloading
-      ? (st.phase === "build" ? "Building local index…" : "Downloading…")
-      : st.available
-        ? `${(st.card_count || 0).toLocaleString()} cards offline` +
-          (st.downloaded_at ? ` · ${st.downloaded_at.slice(0, 10)}` : "")
-        : "Not downloaded yet — enables offline scanning";
-    if (st.downloading) updateLocaldbBar(st);
+    if (st.downloading) {
+      // downloading → keep the full box visible with progress
+      box.classList.remove("hidden");
+      chip.classList.add("hidden");
+      btn.textContent = "…";
+      $("localdb-status").textContent =
+        st.phase === "build" ? "Building local index…" : "Downloading…";
+      updateLocaldbBar(st);
+    } else if (st.available) {
+      // downloaded → collapse into the small chip next to Prices
+      box.classList.add("hidden");
+      chip.classList.remove("hidden");
+      btn.textContent = "Update";
+      const label = chip.querySelector(".btn-label");
+      if (label) label.textContent = "Offline";
+      chip.title = `${(st.card_count || 0).toLocaleString()} cards offline` +
+        (st.downloaded_at ? ` · ${st.downloaded_at.slice(0, 10)} — click to update` : " — click to update");
+    } else {
+      // not downloaded yet → full prompt stays visible
+      box.classList.remove("hidden");
+      chip.classList.add("hidden");
+      btn.textContent = "Download";
+      $("localdb-status").textContent = "Not downloaded yet — enables offline scanning";
+    }
   } catch (err) {
     box.classList.add("hidden");
+    chip.classList.add("hidden");
   }
 }
 
@@ -874,6 +941,11 @@ $("localdb-btn").onclick = async () => {
   const resp = await fetch("/api/localdb/download", { method: "POST" });
   if (!resp.ok) toast("Download already running", 3000);
   refreshLocaldb();
+};
+
+// collapsed offline status — click to surface the full update box
+$("offline-chip").onclick = () => {
+  $("localdb-box").classList.toggle("hidden");
 };
 
 // ------------------------------------------------------------ 3D flip card
@@ -928,7 +1000,7 @@ function openDetail(card) {
   $("detail-img").src = imgUrl(card.image_uri || "");
   $("detail-back").src = imgUrl(card.back_image_uri) || "/cardback.jpg";
   flipReset();
-  $("detail-name").textContent = card.name + (card.foil ? " ✦" : "");
+  $("detail-name").innerHTML = esc(card.name) + (card.foil ? " " + icon("foil") : "");
   $("detail-set").textContent =
     `${card.set_name || "?"} (${(card.set_code || "").toUpperCase()}) · #${card.collector_number || "?"} · ${card.rarity || ""}`;
   $("detail-prices").textContent =
@@ -1125,7 +1197,7 @@ async function loadWishlist() {
   updateWishlistBadge(data.alert_count);
   if (!items.length) {
     box.innerHTML = `<p style="color:var(--dim);text-align:center;margin:18px 0">` +
-      `Wishlist is empty — search above, or hit 🛒 Wishlist in any card's details.</p>`;
+      `Wishlist is empty — search above, or hit Wishlist in any card's details.</p>`;
     return;
   }
   box.innerHTML = "";
@@ -1141,7 +1213,8 @@ async function loadWishlist() {
       `<input type="number" step="0.01" min="0" data-id="${it.id}" value="${it.target_price != null ? it.target_price : ""}" placeholder="—"></div>` +
       (it.target_price != null && it.price != null && it.price <= it.target_price
         ? `<span class="wl-alert">⚠ target met</span>` : "") +
-      `<button class="wl-rm" data-id="${it.id}" title="Remove">✕</button>`;
+      `<button class="wl-rm" data-id="${it.id}" title="Remove">✕</button>` +
+      `<button class="wl-bought" data-id="${it.id}" title="Add to collection and remove from wishlist">✔ Bought</button>`;
     row.querySelector("img").onclick = () => openDetail({ ...it, id: null, foil: 0 });
     row.querySelector(".wl-main").onclick = () => openDetail({ ...it, id: null, foil: 0 });
     box.appendChild(row);
@@ -1153,6 +1226,30 @@ async function loadWishlist() {
         body: JSON.stringify({ id: parseInt(b.dataset.id, 10) }),
       });
       loadWishlist();
+    };
+  });
+  box.querySelectorAll(".wl-bought").forEach((b) => {
+    b.onclick = async () => {
+      const id = parseInt(b.dataset.id, 10);
+      b.disabled = true;
+      try {
+        const resp = await fetch("/api/wishlist/bought", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id, to_collection: true }),
+        });
+        const d = await resp.json();
+        if (d.ok) {
+          toast(`Added ${d.name} to your library`);
+          loadWishlist();
+          loadLibrary();
+        } else {
+          toast("Error: " + (d.error || "failed"));
+          b.disabled = false;
+        }
+      } catch (err) {
+        toast("Bought failed: " + err.message);
+        b.disabled = false;
+      }
     };
   });
   box.querySelectorAll(".wl-target input").forEach((inp) => {
@@ -1215,7 +1312,7 @@ $("wishlist-refresh").onclick = async () => {
   const btn = $("wishlist-refresh");
   if (d.started) {
     btn.disabled = true;
-    btn.textContent = "↻ …";
+    setBtnLabel(btn, "…");
   }
 };
 
@@ -1277,11 +1374,11 @@ function connectEvents() {
     } else if (evt.type === "price-progress") {
       const btn = $("refresh-btn");
       btn.disabled = true;
-      btn.textContent = `↻ ${evt.done}/${evt.total}`;
+      setBtnLabel(btn, `${evt.done}/${evt.total}`);
     } else if (evt.type === "price-done") {
       const btn = $("refresh-btn");
       btn.disabled = false;
-      btn.textContent = "↻ Prices";
+      setBtnLabel(btn, "Prices");
       toast(`Updated ${evt.updated} card prices`);
       loadLibrary();
     } else if (evt.type === "localdb-progress") {
@@ -1298,12 +1395,12 @@ function connectEvents() {
       if (wishlistOpen) loadWishlist();
     } else if (evt.type === "wishlist-progress") {
       const btn = $("wishlist-refresh");
-      if (btn) btn.textContent = `↻ ${evt.done}/${evt.total}`;
+      if (btn) setBtnLabel(btn, `${evt.done}/${evt.total}`);
     } else if (evt.type === "wishlist-done") {
       const btn = $("wishlist-refresh");
-      if (btn) { btn.disabled = false; btn.textContent = "↻ Prices"; }
+      if (btn) { btn.disabled = false; setBtnLabel(btn, "Prices"); }
       toast((evt.alerts && evt.alerts.length)
-        ? "Price alert: " + evt.alerts.join(", ") + " hit your target! 🎉"
+        ? "Price alert: " + evt.alerts.join(", ") + " hit your target! ✦"
         : "Wishlist prices refreshed");
       loadWishlist();
     }
@@ -1324,7 +1421,7 @@ $("refresh-btn").onclick = async () => {
   if (data.started) {
     const btn = $("refresh-btn");
     btn.disabled = true;
-    btn.textContent = data.total ? `↻ 0/${data.total}` : "↻ …";
+    setBtnLabel(btn, data.total ? `0/${data.total}` : "…");
   }
 };
 

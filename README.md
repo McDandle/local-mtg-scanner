@@ -21,7 +21,9 @@ data and prices come from the free [Scryfall](https://scryfall.com) API.
   valuable cards, most-played commanders, and recent additions.
 - **Wishlist with price alerts** — track cards you want to buy with a target
   price; when a refresh finds one at or under target you get an alert
-  badge and a toast.
+  badge and a toast. When a scanned/search card is on your wishlist you're
+  offered a one-tap *mark as bought* — it moves into the library and off
+  the wishlist (also available as a ✔ Bought button on each wishlist row).
 - **Local-first** — the library is a single SQLite file. An optional offline
   card database (~60 MB) makes scanning and search work with no internet.
 - **Prices & history** — current prices per printing (foil and non-foil),
@@ -31,7 +33,7 @@ data and prices come from the free [Scryfall](https://scryfall.com) API.
   the card editor, CSV export/import, draggable 3D card flip.
 - **Deck Builder** — build decks out of your own cards: every deck slot is
   compared against the collection so you see exactly what you own vs. what
-  you need to order, with a priced buy list, Archidekt/precon/decklist
+  you need to order, with a priced buy list, URL/precon/decklist
   import, legality checks, mana curve, and playtest draws.
 
 ## See it in action
@@ -119,6 +121,12 @@ collection vs. how many you need to order.
   the deck is pulled in: commanders and sideboards are mapped to the right
   slots, every card is indexed against your scanned collection, and the
   buy list for the missing cards is one click away.
+- **Moxfield &amp; TappedOut import** — the same URL box accepts
+  `moxfield.com/decks/<id>` and `tappedout.net/mtg-decks/<slug>` links
+  (Moxfield via its public JSON API with exact printings, TappedOut via
+  its plain-text export). Both sit behind bot protection that occasionally
+  blocks servers — if that happens the UI says so and the decklist-paste
+  fallback always works.
 - **Archidekt search** *(best-effort)* — a search box for popular decks is
   wired in, but Archidekt removed their public search API; if their search
   is down the UI tells you so and importing by URL still works.
@@ -149,11 +157,20 @@ collection vs. how many you need to order.
   the same card in a *different* printing, those copies count too (a deck
   slot doesn't care about the art).
 - **Cheapest-printing buy list** — toggle the buy list to substitute the
-  cheapest printing of each missing card (from the offline index).
+  cheapest printing of each missing card (from the offline index). A 🛒
+  TCGplayer button opens the whole buy list pre-filled in TCGplayer Mass
+  Entry, so checkout is one click after Copy/CSV.
 - **Paste decklist** — paste a decklist from the web (`4 Lightning Bolt`,
   `SB: 3 Duress`, or a `Sideboard:` section). Names resolve to the newest
   printing automatically; switch printings in the editor afterwards. You
   can also add the list *straight to your collection* (no deck created).
+  The reverse direction works too: 📄 Export copies any deck back out as
+  plain decklist text for sharing.
+- **Commander recommendations** — 💡 Recs in the editor pulls the
+  most-played cards for the deck's commander from EDHREC's public data
+  (top cards + high-synergy cards, with synergy % and deck counts), and
+  adds any of them to the deck in one tap. Best-effort: if EDHREC is
+  unreachable the button says so instead of failing.
 - **Add deck to collection** — merge every card in a deck into your
   scanned collection with one click — the fast way to index preconstructed
   commander decks (import the precon list, then “Add to collection”).
@@ -165,9 +182,10 @@ restarts; all deck data is stored locally like the rest of the library.
 The module is fully optional at runtime — delete `deckbuilder.py` and
 `static/decks.*` and the tracker runs identically with the deck UI hidden.
 
-Deck data sources: [Archidekt](https://archidekt.com) (deck import) and
-[MTGJSON](https://mtgjson.com) (preconstructed decklists) — both free;
-please be considerate with request volume.
+Deck data sources: [Archidekt](https://archidekt.com), [Moxfield](https://moxfield.com)
+and [TappedOut](https://tappedout.net) (deck import), [EDHREC](https://edhrec.com)
+(recommendations) and [MTGJSON](https://mtgjson.com) (preconstructed decklists) —
+all free; please be considerate with request volume.
 
 ## Data & files
 

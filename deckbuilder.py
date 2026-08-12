@@ -261,7 +261,13 @@ def api_archidekt_import(self):
         self.send_json({"error": "Paste an Archidekt deck URL "
                                   "(archidekt.com/decks/12345) or just the ID."}, 400)
         return
-    arch_id = m.group(1)
+    _import_archidekt_id(self, m.group(1))
+
+
+def _import_archidekt_id(self, arch_id):
+    """Fetch an Archidekt deck by numeric id and create it — shared by
+    api_archidekt_import and api_deck_import_url so read_body (single-use
+    per request) is only consumed by the URL-parsing endpoints."""
     try:
         data = _archidekt_get("/api/decks/%s/" % arch_id)
     except Exception as e:
@@ -1377,6 +1383,299 @@ def api_precon_import(self):
                     "added": added, "skipped": skipped})
 
 
+# ------------------------------------------------- deck URL import
+# Import a deck by URL from Archidekt (via the importer above), Moxfield
+# (public JSON API) or TappedOut (plain-text decklist export). Fetches go
+# through a shared throttled browser-UA helper so we stay polite to all
+# three hosts.
+
+_web_lock = threading.Lock()
+_web_last = [0.0]
+
+
+def _web_get(url, timeout=25):
+    """GET a URL with a browser User-Agent, throttled; text or None."""
+    with _web_lock:
+        wait = 0.25 - (time.time() - _web_last[0])
+        if wait > 0:
+            time.sleep(wait)
+        _web_last[0] = time.time()
+    req = urllib.request.Request(url, headers={
+        "User-Agent": ARCHIDEKT_UA,
+        "Accept": "text/html,application/json,*/*"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", "replace")
+    except Exception:
+        return None
+
+
+def _resolve_card(srv, name, set_code=None, number=None):
+    """Resolve a card to a summary: exact set/number first, then the name
+    ladder (local index, then the game API: exact, fuzzy name, search)."""
+    s = None
+    if set_code and number:
+        s = srv.local_exact_match(set_code, number)
+        if s is None and srv.P.has_api:
+            try:
+                s = srv.P.exact_lookup(set_code, number)
+            except Exception:
+                s = None
+    if s is None:
+        s = srv.local_name_match(name)
+        if s is None and srv.P.has_api:
+            try:
+                s = srv.P.name_lookup(name)
+            except Exception:
+                s = None
+    if s is None and srv.P.has_api:
+        try:
+            hits = srv.P.search(name, limit=3)
+            if hits:
+                s = hits[0]
+        except Exception:
+            s = None
+    return s
+
+
+MOXFIELD_FORMATS = ("Commander", "Standard", "Modern", "Pioneer", "Legacy",
+                    "Vintage", "Pauper", "Brawl")
+
+
+def _norm_format(fmt):
+    """Normalize a Moxfield format string against the known list; else None."""
+    low = (fmt or "").strip().lower()
+    for f in MOXFIELD_FORMATS:
+        if low == f.lower():
+            return f
+    return None
+
+
+def _parse_decklist(text):
+    """Plain-text decklist lines -> [(name, qty, role)]; mirrors the
+    parseDecklist rules in static/decks.js (comments, Sideboard: sections,
+    "SB: " prefixes, leading quantities)."""
+    out = []
+    role = "main"
+    for raw in re.split(r"\r?\n", text):
+        t = raw.strip()
+        if not t or t.startswith("#"):
+            continue
+        if re.match(r"^sideboard\b", t, re.I):
+            role = "sideboard"
+            continue
+        line_role = role
+        m = re.match(r"^sb\s*:\s*", t, re.I)
+        if m:
+            line_role = "sideboard"
+            t = t[m.end():].strip()
+        qty = 1
+        m = re.match(r"^(\d{1,3})\s*(?:x|×)?\s*(.+)$", t, re.I)
+        if m:
+            qty = max(1, int(m.group(1)))
+            t = m.group(2).strip()
+        if not t:
+            continue
+        out.append((t, qty, line_role))
+    return out
+
+
+def _finish_deck(self, name, fmt, resolved, skipped):
+    """Create the deck row, insert resolved (summary, role, qty) cards,
+    broadcast, and reply — shared by every URL importer."""
+    if not resolved:
+        # Never leave an empty deck behind: either the source deck really is
+        # empty/private, or its response shape changed and nothing parsed.
+        self.send_json({"error": "No cards could be imported from that deck — "
+                                 "check it is public and not empty."
+                                 + (" Unmatched: %s" % ", ".join(skipped[:5])
+                                    if skipped else "")}, 502)
+        return
+    srv = _server()
+    ts = _now_iso()
+    with srv.db_lock, srv.db() as conn:
+        cur = conn.execute(
+            "INSERT INTO decks (name, format, created_at, updated_at) "
+            "VALUES (?,?,?,?)", (name, fmt, ts, ts))
+        deck_id = cur.lastrowid
+        added = 0
+        for s, role, qty in resolved:
+            _insert_deck_card(conn, deck_id, s, role, qty, False)
+            added += qty
+    srv.broadcast({"type": "decks-changed"})
+    self.send_json({"ok": True, "id": deck_id, "name": name,
+                    "added": added, "skipped": skipped})
+
+
+def _import_moxfield(self, mox_id):
+    """Create a deck from a Moxfield deck id (public JSON API, v3 then v2)."""
+    text = _web_get("https://api2.moxfield.com/v3/decks/all/%s" % mox_id)
+    if not text:
+        text = _web_get("https://api2.moxfield.com/v2/decks/all/%s" % mox_id)
+    if not text:
+        self.send_json({"error": "Could not reach Moxfield — check the URL and "
+                                 "try again."}, 502)
+        return
+    try:
+        data = json.loads(text)
+    except ValueError:
+        self.send_json({"error": "Moxfield returned an unreadable response — "
+                                 "check the deck is public and try again."}, 502)
+        return
+    name = (data.get("name") or "").strip() or ("Moxfield deck " + mox_id)
+    fmt = _norm_format(data.get("format"))
+    srv = _server()
+    resolved, skipped = [], []
+    for board, role in (("commanders", "commander"),
+                        ("mainboard", "main"),
+                        ("sideboard", "sideboard")):
+        # v3 nests each board under "boards" as {count, cards}; v2 puts the
+        # card map at the top level.
+        entries = ((data.get("boards") or {}).get(board) or {}).get("cards")
+        if not isinstance(entries, dict):
+            entries = data.get(board)
+        if not isinstance(entries, dict):
+            continue
+        for entry in entries.values():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                qty = max(1, int(entry.get("quantity") or 1))
+            except (TypeError, ValueError):
+                qty = 1
+            card = entry.get("card") or {}
+            cname = (card.get("name") or "").strip()
+            if not cname:
+                continue
+            set_code = str(card.get("set") or "").strip()
+            # collector number: "cn" in v3, "number" in v2
+            number = str(card.get("cn") or card.get("number") or "").strip()
+            s = _resolve_card(srv, cname, set_code, number)
+            if s is None:
+                skipped.append(cname)
+                continue
+            resolved.append((s, role, qty))
+    _finish_deck(self, name, fmt, resolved, skipped)
+
+
+def _import_tappedout(self, slug):
+    """Create a deck from a TappedOut slug (plain-text decklist export)."""
+    text = _web_get("https://tappedout.net/mtg-decks/%s/?fmt=txt" % slug)
+    if not text:
+        self.send_json({"error": "Could not reach TappedOut — check the URL and "
+                                 "try again."}, 502)
+        return
+    if re.search(r"<!DOCTYPE|Just a moment|Attention", text, re.I):
+        self.send_json({"error": "TappedOut is currently unavailable (their bot "
+                                 "protection blocked the request) — try the "
+                                 "decklist paste instead."}, 502)
+        return
+    srv = _server()
+    resolved, skipped = [], []
+    for cname, qty, role in _parse_decklist(text):
+        s = _resolve_card(srv, cname)
+        if s is None:
+            skipped.append(cname)
+            continue
+        resolved.append((s, role, qty))
+    _finish_deck(self, "TappedOut deck %s" % slug, None, resolved, skipped)
+
+
+def api_deck_import_url(self):
+    """Create a deck from an Archidekt, Moxfield, or TappedOut deck URL."""
+    body = json.loads(self.read_body())
+    url = (body.get("url") or "").strip()
+    m = re.search(r"archidekt\.com/decks/(\d+)", url)
+    if not m:
+        m = re.fullmatch(r"(\d{3,})", url)
+    if m:
+        _import_archidekt_id(self, m.group(1))
+        return
+    m = re.search(r"moxfield\.com/decks/([A-Za-z0-9_-]+)", url)
+    if m:
+        _import_moxfield(self, m.group(1))
+        return
+    m = re.search(r"tappedout\.net/mtg-decks/([^/?#]+)", url)
+    if m:
+        _import_tappedout(self, m.group(1))
+        return
+    self.send_json({"error": "Paste a deck URL — archidekt.com/decks/12345, "
+                             "moxfield.com/decks/abc123, or "
+                             "tappedout.net/mtg-decks/<deck>/"}, 400)
+
+
+# ---------------------------------------------------------------- edhrec
+# Commander "top cards" recommendations from EDHREC's public JSON endpoint
+# (json.edhrec.com, unofficial but open). Fetches are throttled through
+# _web_get and cached in memory for an hour so repeat lookups are instant.
+
+EDHREC_TTL = 3600
+_edhrec_cache = {}
+_edhrec_lock = threading.Lock()
+
+
+def _edhrec_slug(name):
+    """'Uril, the Miststalker' -> 'uril-the-miststalker'."""
+    s = re.sub(r"[^a-z0-9 ]", "", (name or "").lower())
+    return re.sub(r" +", "-", s.strip())
+
+
+def api_edhrec(self, name):
+    """Top cards for a commander, from EDHREC's JSON endpoint (cached 1h)."""
+    slug = _edhrec_slug(name)
+    if not slug:
+        self.send_json({"cards": [], "unavailable": True})
+        return
+    with _edhrec_lock:
+        hit = _edhrec_cache.get(slug)
+        if hit and time.time() - hit[0] < EDHREC_TTL:
+            self.send_json(hit[1])
+            return
+    try:
+        text = _web_get("https://json.edhrec.com/pages/commanders/%s.json" % slug)
+        if not text:
+            raise ValueError("empty response")
+        data = json.loads(text)
+        groups = (data.get("container") or {}).get("json_dict") or {}
+        groups = groups.get("cardlists") or []
+    except Exception as e:
+        self.send_json({"error": "EDHREC is currently unavailable — %s" % e})
+        return
+    picked, saw_top = {}, False
+    for tag in ("topcards", "highsynergycards"):
+        for g in groups:
+            if not isinstance(g, dict) or g.get("tag") != tag:
+                continue
+            if tag == "topcards":
+                saw_top = True
+            for cv in (g.get("cardviews") or []):
+                cvname = (cv.get("name") or "").strip()
+                if not cvname or cvname in picked:
+                    continue
+                picked[cvname] = cv
+                if len(picked) >= 24:
+                    break
+        if len(picked) >= 24:
+            break
+    if not saw_top:
+        self.send_json({"cards": [], "unavailable": True})
+        return
+    srv = _server()
+    cards = []
+    for cvname, cv in picked.items():
+        s = _resolve_card(srv, cvname)
+        if s is None:
+            continue
+        s = dict(s)
+        s["synergy"] = cv.get("synergy")
+        s["num_decks"] = cv.get("num_decks")
+        cards.append(s)
+    resp = {"commander": name, "cards": cards}
+    with _edhrec_lock:
+        _edhrec_cache[slug] = (time.time(), resp)
+    self.send_json(resp)
+
+
 # ---------------------------------------------------------------- routing
 
 def _serve_static(handler, relpath, ctype):
@@ -1418,6 +1717,9 @@ def handle_get(handler, path, query):
     if path == "/api/decks/archidekt/search":
         api_archidekt_search(handler, query.get("q", ""))
         return True
+    if path == "/api/decks/edhrec":
+        api_edhrec(handler, query.get("name", ""))
+        return True
     m = re.fullmatch(r"/api/decks/(\d+)", path)
     if m:
         api_deck_detail(handler, int(m.group(1)))
@@ -1453,6 +1755,9 @@ def handle_post(handler, path):
         return True
     if path == "/api/decks/archidekt/import":
         api_archidekt_import(handler)
+        return True
+    if path == "/api/decks/import-url":
+        api_deck_import_url(handler)
         return True
     if path == "/api/collection/import-decklist":
         api_collection_import_decklist(handler)

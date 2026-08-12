@@ -182,7 +182,7 @@
       : `<span class="full">✓</span>`;
     row.innerHTML =
       `<img loading="lazy" src="${imgUrl(c.image_uri || "")}" alt="">` +
-      `<div class="deck-card-main"><b>${esc(c.name)}${c.foil ? " <span class=\"foil-tag\">✦</span>" : ""}</b>` +
+      `<div class="deck-card-main"><b>${esc(c.name)}${c.foil ? " <span class=\"foil-tag\">" + icon("foil") + "</span>" : ""}</b>` +
       `<small>${esc(c.set_name || "?")} · #${esc(c.collector_number || "?")} · ${esc(c.rarity || "")}</small></div>` +
       `<div class="deck-card-status">${status}</div>` +
       `<div class="deck-card-qty"><button data-d="-1">−</button><span>${c.quantity}</span><button data-d="1">+</button></div>` +
@@ -331,7 +331,7 @@
     box.innerHTML = "";
     if (!data.items.length) {
       box.innerHTML = `<p style="color:var(--green);text-align:center;margin:20px 0">` +
-        `Nothing to order — you own every card in this deck. 🎉</p>`;
+        `Nothing to order — you own every card in this deck. ✦</p>`;
     }
     for (const i of data.items) {
       const row = document.createElement("div");
@@ -339,7 +339,7 @@
       const unit = i.unit_price != null ? "$" + i.unit_price.toFixed(2) : "—";
       row.innerHTML =
         `<img loading="lazy" src="${imgUrl(i.image_uri || "")}">` +
-        `<div class="buylist-main"><b>${esc(i.name)}${i.foil ? " ✦" : ""}</b>` +
+        `<div class="buylist-main"><b>${esc(i.name)}${i.foil ? " " + icon("foil") : ""}</b>` +
         `<small>${esc(i.set_name || "?")} · #${esc(i.collector_number || "?")} · ${esc(i.rarity || "")}</small></div>` +
         `<div class="buylist-qty">×${i.qty}</div>` +
         `<div class="buylist-price"><small>${unit} each</small><b>$${i.total.toFixed(2)}</b></div>`;
@@ -371,19 +371,32 @@
     return lines.join("\n");
   }
 
-  async function copyBuylist() {
-    const text = buylistText();
+  async function copyText(text, toastMsg) {
     try {
       await navigator.clipboard.writeText(text);
-      toast("Buy list copied");
+      toast(toastMsg);
     } catch (err) {
       const ta = document.createElement("textarea");
       ta.value = text;
       document.body.appendChild(ta);
       ta.select();
-      try { document.execCommand("copy"); toast("Buy list copied"); } catch (e) { toast("Copy failed"); }
+      try { document.execCommand("copy"); toast(toastMsg); } catch (e) { toast("Copy failed"); }
       ta.remove();
     }
+  }
+
+  async function copyBuylist() {
+    copyText(buylistText(), "Buy list copied");
+  }
+
+  function openTcgplayer() {
+    if (!buylist) return;
+    // No foil marker: TCGplayer Mass Entry has no reliable foil syntax.
+    const lines = buylist.items.map((i) =>
+      `${i.qty} ${i.name} ${(i.set_code || "").toUpperCase()} ${i.collector_number || ""}`);
+    const url = "https://www.tcgplayer.com/massentry?productline=Magic&catalogId=1&q=" +
+      encodeURIComponent(lines.join("\n"));
+    window.open(url, "_blank");
   }
 
   function exportBuylistCsv() {
@@ -404,6 +417,22 @@
     a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
     toast("Buy list CSV downloaded");
+  }
+
+  function exportDeckText() {
+    if (!currentDeck) return;
+    const lines = [];
+    for (const role of ["commander", "main"]) {
+      const group = currentDeck.cards.filter((c) => c.role === role);
+      if (!group.length) continue;
+      for (const c of group) lines.push(`${c.quantity} ${c.name}`);
+    }
+    const sb = currentDeck.cards.filter((c) => c.role === "sideboard");
+    if (sb.length) {
+      lines.push("", "Sideboard:");
+      for (const c of sb) lines.push(`${c.quantity} ${c.name}`);
+    }
+    copyText(lines.join("\n"), "Decklist copied");
   }
 
   // ------------------------------------------------------------ paste decklist
@@ -613,6 +642,83 @@
       row.className = "legality-issue " + i.severity;
       const label = (i.card ? esc(i.card) + (i.qty ? ` ×${i.qty}` : "") + " — " : "");
       row.innerHTML = `<b>${i.severity === "error" ? "✗" : "⚠"}</b><span>${label}${esc(i.issue)}</span>`;
+      box.appendChild(row);
+    }
+  }
+
+  // ------------------------------------------------------------ EDHREC recs
+  async function openRecs() {
+    if (!currentDeck) return;
+    const commanders = currentDeck.cards
+      .filter((c) => c.role === "commander").map((c) => c.name);
+    if (!commanders.length) {
+      toast("Add a commander first — set a card's role to Commander in the deck.");
+      return;
+    }
+    const note = $("recs-note");
+    const box = $("recs-items");
+    note.classList.add("hidden");
+    box.innerHTML = `<p class="status">Loading recommendations…</p>`;
+    $("recs-modal").classList.remove("hidden");
+    let lists;
+    try {
+      lists = await Promise.all(commanders.map((name) =>
+        fetch("/api/decks/edhrec?name=" + encodeURIComponent(name)).then((r) => r.json())));
+    } catch (err) {
+      note.textContent = "Recommendations failed: " + err.message;
+      note.classList.remove("hidden");
+      box.innerHTML = "";
+      return;
+    }
+    const err = lists.find((d) => d.error);
+    if (err) {
+      note.textContent = err.error;
+      note.classList.remove("hidden");
+      box.innerHTML = "";
+      return;
+    }
+    if (lists.every((d) => d.unavailable)) {
+      note.textContent = "No recommendations available for this commander.";
+      note.classList.remove("hidden");
+      box.innerHTML = "";
+      return;
+    }
+    const seen = new Set();
+    const cards = [];
+    for (const d of lists) {
+      for (const c of (d.cards || [])) {
+        if (seen.has(c.scryfall_id)) continue;
+        seen.add(c.scryfall_id);
+        cards.push(c);
+      }
+    }
+    box.innerHTML = "";
+    const inDeck = new Set(
+      currentDeck.cards.map((c) => (c.name || "").trim().toLowerCase()));
+    for (const c of cards) {
+      const row = document.createElement("div");
+      row.className = "buylist-row";
+      const pct = Math.round((c.synergy || 0) * 100);
+      const already = inDeck.has((c.name || "").trim().toLowerCase());
+      row.innerHTML =
+        `<img loading="lazy" src="${imgUrl(c.image_uri || "")}">` +
+        `<div class="buylist-main"><b>${esc(c.name)}</b>` +
+        `<small>${esc(c.set_name || "")} · #${esc(c.collector_number || "?")} · ` +
+        `${esc(c.rarity || "")}</small>` +
+        `<small>synergy ${pct}% · in ${c.num_decks || 0} decks</small></div>` +
+        (already
+          ? `<span class="recs-in-deck">in deck</span>`
+          : `<button class="recs-add">＋ Add</button>`);
+      row.querySelector("img").onclick = () => openCardModal(c);
+      row.querySelector(".buylist-main").onclick = () => openCardModal(c);
+      const add = row.querySelector(".recs-add");
+      if (add) {
+        add.onclick = async () => {
+          await postCard(c, { quantity: 1, role: "main" });
+          toast(`Added ${c.name}`);
+          refreshDeck(currentDeck.deck.id);
+        };
+      }
       box.appendChild(row);
     }
   }
@@ -877,11 +983,11 @@
     }
   }
 
-  // ------------------------------------------------------------ Archidekt
-  async function importArchidekt(urlOrId) {
-    toast("Importing from Archidekt…", 8000);
+  // ------------------------------------------------------------ import by URL
+  async function importDeckUrl(urlOrId) {
+    toast("Importing deck…", 8000);
     try {
-      const resp = await fetch("/api/decks/archidekt/import", {
+      const resp = await fetch("/api/decks/import-url", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: urlOrId }),
@@ -928,7 +1034,7 @@
           `<div class="arch-deck-main"><b>${esc(d.name)}</b>` +
           `<small>${esc(d.format || "No format")} · by ${esc(d.owner || "?")} · ${d.card_count || "?"} cards</small></div>` +
           `<span class="arch-import-btn">Import</span>`;
-        row.onclick = () => importArchidekt(String(d.id));
+        row.onclick = () => importDeckUrl(String(d.id));
         box.appendChild(row);
       }
     } catch (err) {
@@ -1048,7 +1154,7 @@
         row.innerHTML =
           `<span class="dv-qty">${c.quantity}</span>` +
           `<img loading="lazy" src="${imgUrl(c.image_uri || "")}">` +
-          `<div class="dv-main"><b>${esc(c.name)}${c.foil ? " ✦" : ""}` +
+          `<div class="dv-main"><b>${esc(c.name)}${c.foil ? " " + icon("foil") : ""}` +
           (c.role === "commander" ? ` <span class="dv-cmd">commander</span>` : "") + `</b>` +
           `<small>${esc(c.set_name || "?")} · #${esc(c.collector_number || "?")}</small></div>` +
           `<div class="dv-status">${status}</div>` +
@@ -1095,9 +1201,11 @@
     $("deck-format").addEventListener("change", saveDeckMeta);
     $("deck-delete-btn").onclick = deleteDeck;
     $("deck-duplicate-btn").onclick = duplicateDeck;
+    $("deck-export-btn").onclick = exportDeckText;
     $("deck-buylist-btn").onclick = openBuylist;
     $("deck-view-btn").onclick = openDeckView;
     $("deck-legal-btn").onclick = openLegality;
+    $("deck-recs-btn").onclick = openRecs;
     $("deck-value-btn").onclick = openValue;
     $("deck-playtest-btn").onclick = openPlaytest;
     $("deck-add-collection-btn").onclick = addToCollection;
@@ -1105,6 +1213,7 @@
     $("deck-import-btn2").onclick = openImport;
     $("deck-search").addEventListener("input", onDeckSearch);
     $("buylist-close").onclick = closeBuylist;
+    $("buylist-tcg").onclick = openTcgplayer;
     $("buylist-copy").onclick = copyBuylist;
     $("buylist-csv").onclick = exportBuylistCsv;
     $("buylist-cheapest").onchange = () => { if (buylist) openBuylist(); };
@@ -1114,6 +1223,7 @@
     $("planner-btn").onclick = openPlanner;
     $("planner-close").onclick = () => $("planner-modal").classList.add("hidden");
     $("legality-close").onclick = () => $("legality-modal").classList.add("hidden");
+    $("recs-close").onclick = () => $("recs-modal").classList.add("hidden");
     $("playtest-close").onclick = () => $("playtest-modal").classList.add("hidden");
     $("playtest-draw").onclick = drawHand;
     $("playtest-redraw").onclick = drawHand;
@@ -1132,10 +1242,10 @@
       renderDeckView();
     };
 
-    // Archidekt
-    $("arch-import").onclick = () => importArchidekt($("arch-url").value.trim());
+    // import by URL (Archidekt / Moxfield / TappedOut)
+    $("arch-import").onclick = () => importDeckUrl($("arch-url").value.trim());
     $("arch-url").addEventListener("keydown", (e) => {
-      if (e.key === "Enter") importArchidekt($("arch-url").value.trim());
+      if (e.key === "Enter") importDeckUrl($("arch-url").value.trim());
     });
     $("arch-go").onclick = archidektSearch;
     $("arch-q").addEventListener("keydown", (e) => {
@@ -1152,8 +1262,8 @@
     document.addEventListener("keydown", (e) => {
       if (e.key !== "Escape") return;
       const order = ["importdeck-modal", "playtest-modal", "value-modal",
-                     "legality-modal", "planner-modal", "buylist-modal",
-                     "deckview-modal", "deck-modal"];
+                     "legality-modal", "recs-modal", "planner-modal",
+                     "buylist-modal", "deckview-modal", "deck-modal"];
       for (const id of order) {
         const el = $(id);
         if (!el || el.classList.contains("hidden")) continue;
@@ -1165,8 +1275,8 @@
       }
     });
     for (const id of ["deck-modal", "buylist-modal", "importdeck-modal",
-                      "planner-modal", "legality-modal", "playtest-modal",
-                      "value-modal", "deckview-modal"]) {
+                      "planner-modal", "legality-modal", "recs-modal",
+                      "playtest-modal", "value-modal", "deckview-modal"]) {
       $(id).addEventListener("click", (e) => {
         if (e.target !== $(id)) return;
         if (id === "deck-modal") closeDeckModal();

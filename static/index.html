@@ -4,18 +4,20 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#12151d">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2.6l2.3 7.1 7.1 2.3-7.1 2.3L12 21.4l-2.3-7.1L2.6 12l7.1-2.3z' fill='%23c9a86a'/%3E%3C/svg%3E">
 <title>MTG Tracker</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+<script src="/icons.js"></script>
 
 <header class="topbar">
   <a class="brand" href="/" title="Home">
-    <span class="logo" aria-hidden="true">✦</span>
+    <span class="logo" aria-hidden="true"><svg class="ic"><use href="#i-spark"/></svg></span>
     <h1>MTG Tracker</h1>
   </a>
   <div class="top-actions">
-    <button id="wishlist-btn" class="ghost" title="Cards you want to buy">🛒 <span class="btn-label">Wishlist</span><span id="wishlist-badge" class="nav-badge hidden"></span></button>
+    <button id="wishlist-btn" class="ghost" title="Cards you want to buy"><svg class="ic" aria-hidden="true"><use href="#i-cart"/></svg> <span class="btn-label">Wishlist</span><span id="wishlist-badge" class="nav-badge hidden"></span></button>
     <div class="nav-slot"></div>
   </div>
 </header>
@@ -50,7 +52,8 @@
         <button id="localdb-btn" class="ghost small">Download</button>
         <div id="localdb-bar-wrap" class="hidden"><div id="localdb-bar"></div></div>
       </div>
-      <button id="refresh-btn" class="ghost small" title="Fetch fresh prices">↻ Prices</button>
+      <button id="offline-chip" class="offline-chip hidden" title="Offline card database"><span class="dot" aria-hidden="true"></span><span class="btn-label">Offline</span></button>
+      <button id="refresh-btn" class="ghost small" title="Fetch fresh prices"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg> <span class="btn-label">Prices</span></button>
     </div>
   </section>
 
@@ -65,11 +68,11 @@
 
   <!-- scanner -->
   <section id="scanner" class="panel">
-    <h2 class="section-title"><span class="title-icon">📷</span> Scanner</h2>
+    <h2 class="section-title"><span class="title-icon"><svg class="ic"><use href="#i-camera"/></svg></span> Scanner</h2>
     <div class="scan-actions">
-      <button id="live-btn" class="primary-btn" title="Start live scanning">🎥 Live Scan</button>
-      <button id="pair-btn" class="ghost scan-pair" title="Pair your phone as a scanner">📱 Pair</button>
-      <label id="photo-btn" for="camera-input">📷 Single photo
+      <button id="live-btn" class="primary-btn" title="Start live scanning"><svg class="ic" aria-hidden="true"><use href="#i-video"/></svg> Live Scan</button>
+      <button id="pair-btn" class="ghost scan-pair" title="Pair your phone as a scanner"><svg class="ic" aria-hidden="true"><use href="#i-phone"/></svg> Pair</button>
+      <label id="photo-btn" for="camera-input"><svg class="ic" aria-hidden="true"><use href="#i-camera"/></svg> Single photo
         <input id="camera-input" type="file" accept="image/*" capture="environment">
       </label>
     </div>
@@ -88,6 +91,7 @@
             <button id="qty-plus">+</button>
           </div>
           <button id="add-btn" class="primary">Add to library</button>
+          <button id="result-wishlist" class="ghost" title="Add this card to your wishlist"><svg class="ic" aria-hidden="true"><use href="#i-cart"/></svg> <span class="btn-label">Wishlist</span></button>
         </div>
         <p id="wrong-card">Not right? Search below or scan again.</p>
       </div>
@@ -101,16 +105,16 @@
   <!-- library -->
   <section id="library" class="panel">
     <div class="lib-head">
-      <h2 class="section-title"><span class="title-icon">🗂</span> Library</h2>
+      <h2 class="section-title"><span class="title-icon"><svg class="ic"><use href="#i-cards"/></svg></span> Library</h2>
       <div class="lib-head-actions">
-        <button id="batch-btn" class="ghost small" title="Select multiple cards to edit">☑ Select</button>
-        <button id="export-btn" class="ghost small" title="Download the library as CSV">⬇ Export</button>
+        <button id="batch-btn" class="ghost small" title="Select multiple cards to edit"><svg class="ic" aria-hidden="true"><use href="#i-select"/></svg> <span class="btn-label">Select</span></button>
+        <button id="export-btn" class="ghost small" title="Download the library as CSV"><svg class="ic" aria-hidden="true"><use href="#i-download"/></svg> <span class="btn-label">Export</span></button>
         <label id="import-label" class="ghost small" title="Import cards from a CSV file">
-          ⬆ Import<input id="import-input" type="file" accept=".csv,text/csv">
+          <svg class="ic" aria-hidden="true"><use href="#i-upload"/></svg> <span class="btn-label">Import</span><input id="import-input" type="file" accept=".csv,text/csv">
         </label>
         <div class="seg" id="view-toggle" title="Switch view">
-          <button data-view="grid" class="active" title="Grid view">▦</button>
-          <button data-view="list" title="List view">☰</button>
+          <button data-view="grid" class="active" title="Grid view"><svg class="ic" aria-hidden="true"><use href="#i-grid"/></svg></button>
+          <button data-view="list" title="List view"><svg class="ic" aria-hidden="true"><use href="#i-list"/></svg></button>
         </div>
       </div>
     </div>
@@ -186,7 +190,7 @@
   </div>
   <div class="scan-detect">
     <div id="scan-overlay-text">Point at a card…</div>
-    <button id="scan-confirm" class="scan-confirm hidden">✓ Add to library</button>
+    <button id="scan-confirm" class="scan-confirm hidden"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg> <span class="scan-label">Add to library</span></button>
   </div>
   <div class="scan-topbar">
     <span class="scan-live">● Live scan</span>
@@ -197,7 +201,7 @@
     <label class="foil-toggle"><input type="checkbox" id="scan-foil"> Foil</label>
     <span id="session-count" class="session-count"></span>
     <div id="zoom-row" class="hidden">
-      <span>🔍</span>
+      <svg class="ic" aria-hidden="true"><use href="#i-search"/></svg>
       <input id="zoom-slider" type="range">
     </div>
   </div>
@@ -242,7 +246,7 @@
         <span id="detail-qty">1</span>
         <button id="detail-qty-plus">+</button>
       </div>
-      <button id="detail-wishlist" class="ghost" title="Add this card to your wishlist">🛒 Wishlist</button>
+      <button id="detail-wishlist" class="ghost" title="Add this card to your wishlist"><svg class="ic" aria-hidden="true"><use href="#i-cart"/></svg> <span class="btn-label">Wishlist</span></button>
       <button id="detail-delete" class="danger">Delete</button>
     </div>
     <details class="printing-box">
@@ -266,9 +270,9 @@
 <div id="wishlist-modal" class="hidden">
   <div class="modal-box wishlist-box">
     <div class="wl-head">
-      <h3>🛒 Wishlist</h3>
+      <h3><svg class="ic" aria-hidden="true"><use href="#i-cart"/></svg> Wishlist</h3>
       <div class="lib-head-actions">
-        <button id="wishlist-refresh" class="ghost small" title="Fetch fresh prices">↻ Prices</button>
+        <button id="wishlist-refresh" class="ghost small" title="Fetch fresh prices"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg> <span class="btn-label">Prices</span></button>
         <button id="wishlist-close" class="ghost small">Close</button>
       </div>
     </div>

@@ -4,14 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0a1120">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2.6l2.3 7.1 7.1 2.3-7.1 2.3L12 21.4l-2.3-7.1L2.6 12l7.1-2.3z' fill='%23c9a86a'/%3E%3C/svg%3E">
 <title>MTG Tracker</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body data-page="home">
+<script src="/icons.js"></script>
 
 <header class="topbar">
   <a class="brand" href="/" title="Home">
-    <span class="logo" aria-hidden="true">✦</span>
+    <span class="logo" aria-hidden="true"><svg class="ic"><use href="#i-spark"/></svg></span>
     <h1>MTG Tracker</h1>
   </a>
   <div class="top-actions">
@@ -32,30 +34,30 @@
 
   <!-- portfolio tracker -->
   <section class="panel">
-    <h2 class="section-title"><span class="title-icon">📈</span> Portfolio value</h2>
+    <h2 class="section-title"><span class="title-icon"><svg class="ic"><use href="#i-chart"/></svg></span> Portfolio value</h2>
     <div id="value-chart" class="chart-box"><p class="dim">Loading…</p></div>
     <p id="value-note" class="dim small-note"></p>
   </section>
 
   <!-- quick access -->
   <section class="panel">
-    <h2 class="section-title"><span class="title-icon">🗺</span> Quick access</h2>
+    <h2 class="section-title"><span class="title-icon"><svg class="ic"><use href="#i-compass"/></svg></span> Quick access</h2>
     <div class="quick-grid">
       <a class="quick-tile" href="/library.html">
-        <span class="qt-icon">🗂</span><b>Library</b><small>Scan, browse &amp; manage your cards</small>
+        <span class="qt-icon"><svg class="ic"><use href="#i-cards"/></svg></span><b>Library</b><small>Scan, browse &amp; manage your cards</small>
       </a>
       <a class="quick-tile" href="/insights.html">
-        <span class="qt-icon">📈</span><b>Insights</b><small>Value trends &amp; collection analytics</small>
+        <span class="qt-icon"><svg class="ic"><use href="#i-chart"/></svg></span><b>Insights</b><small>Value trends &amp; collection analytics</small>
       </a>
       <a id="quick-decks" class="quick-tile hidden" href="/decks.html">
-        <span class="qt-icon">🂠</span><b>Decks</b><small>Build decks from the cards you own</small>
+        <span class="qt-icon"><svg class="ic"><use href="#i-decks"/></svg></span><b>Decks</b><small>Build decks from the cards you own</small>
       </a>
     </div>
   </section>
 
   <!-- recently added -->
   <section class="panel">
-    <h2 class="section-title"><span class="title-icon">🕒</span> Recently added</h2>
+    <h2 class="section-title"><span class="title-icon"><svg class="ic"><use href="#i-clock"/></svg></span> Recently added</h2>
     <div id="recent" class="card-list"><p class="dim">Loading…</p></div>
   </section>
 </main>

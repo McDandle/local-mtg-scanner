@@ -4,14 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0a1120">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2.6l2.3 7.1 7.1 2.3-7.1 2.3L12 21.4l-2.3-7.1L2.6 12l7.1-2.3z' fill='%23c9a86a'/%3E%3C/svg%3E">
 <title>MTG Tracker — Insights</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body data-page="insights">
+<script src="/icons.js"></script>
 
 <header class="topbar">
   <a class="brand" href="/" title="Home">
-    <span class="logo" aria-hidden="true">📈</span>
+    <span class="logo" aria-hidden="true"><svg class="ic"><use href="#i-chart"/></svg></span>
     <h1>Insights</h1>
   </a>
   <div class="top-actions">
@@ -31,41 +33,41 @@
   </section>
 
   <section class="panel">
-    <h2 class="section-title"><span class="title-icon">📈</span> Collection value over time</h2>
+    <h2 class="section-title"><span class="title-icon"><svg class="ic"><use href="#i-chart"/></svg></span> Collection value over time</h2>
     <div id="value-chart" class="chart-box"><p class="dim">Loading…</p></div>
     <p id="value-note" class="dim small-note"></p>
   </section>
 
   <div class="insights-grid">
     <section class="panel">
-      <h2 class="section-title"><span class="title-icon">✦</span> Value by rarity</h2>
+      <h2 class="section-title"><span class="title-icon"><svg class="ic"><use href="#i-gem"/></svg></span> Value by rarity</h2>
       <div id="rarity-chart" class="chart-box"><p class="dim">Loading…</p></div>
     </section>
     <section class="panel">
-      <h2 class="section-title"><span class="title-icon">🎨</span> Cards by color</h2>
+      <h2 class="section-title"><span class="title-icon"><svg class="ic"><use href="#i-palette"/></svg></span> Cards by color</h2>
       <div id="color-chart" class="chart-box"><p class="dim">Loading…</p></div>
     </section>
   </div>
 
   <section class="panel">
-    <h2 class="section-title"><span class="title-icon">🗂</span> Top sets by value</h2>
+    <h2 class="section-title"><span class="title-icon"><svg class="ic"><use href="#i-cards"/></svg></span> Top sets by value</h2>
     <div id="sets-chart" class="chart-box"><p class="dim">Loading…</p></div>
   </section>
 
   <section class="panel" id="progress-panel">
-    <h2 class="section-title"><span class="title-icon">📚</span> Set completion <small id="progress-note"></small></h2>
+    <h2 class="section-title"><span class="title-icon"><svg class="ic"><use href="#i-book"/></svg></span> Set completion <small id="progress-note"></small></h2>
     <div id="set-progress" class="progress-list"><p class="dim">Loading…</p></div>
   </section>
 
   <div class="insights-grid">
     <section class="panel">
-      <h2 class="section-title"><span class="title-icon">💎</span> Most valuable cards</h2>
+      <h2 class="section-title"><span class="title-icon"><svg class="ic"><use href="#i-price"/></svg></span> Most valuable cards</h2>
       <div id="top-cards" class="card-list"><p class="dim">Loading…</p></div>
     </section>
     <section class="panel">
-      <h2 class="section-title"><span class="title-icon">🧙</span> Most played commanders</h2>
+      <h2 class="section-title"><span class="title-icon"><svg class="ic"><use href="#i-wizard"/></svg></span> Most played commanders</h2>
       <div id="commanders" class="commander-list"><p class="dim">Loading…</p></div>
-      <h2 class="section-title" style="margin-top:16px"><span class="title-icon">🕒</span> Recently added</h2>
+      <h2 class="section-title" style="margin-top:16px"><span class="title-icon"><svg class="ic"><use href="#i-clock"/></svg></span> Recently added</h2>
       <div id="recent" class="card-list"><p class="dim">Loading…</p></div>
     </section>
   </div>

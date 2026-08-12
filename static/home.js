@@ -69,7 +69,7 @@ async function load() {
   const pts = (data.value_history || []).map((h) => ({ t: h.date, v: h.value }));
   if (pts.length < 2) {
     $("value-chart").innerHTML =
-      `<p class="dim">Not enough price snapshots yet — hit “↻ Prices” on the ` +
+      `<p class="dim">Not enough price snapshots yet — hit “Prices” on the ` +
       `library page a few times over the coming days.</p>`;
     $("value-note").textContent = "";
   } else {
