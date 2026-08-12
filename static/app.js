@@ -619,6 +619,7 @@ function filteredLibrary() {
   const color = $("filter-color").value;
   const foilF = $("filter-foil").value;
   const condF = $("filter-condition").value;
+  const statusF = $("filter-status").value;
   return libraryCards.filter((c) => {
     if (filter && !(c.name.toLowerCase().includes(filter) ||
                     (c.set_name || "").toLowerCase().includes(filter) ||
@@ -631,6 +632,9 @@ function filteredLibrary() {
     if (foilF === "foil" && !c.foil) return false;
     if (foilF === "nonfoil" && c.foil) return false;
     if (condF !== "all" && (c.condition || "NM") !== condF) return false;
+    if (statusF === "trade" && !c.for_trade) return false;
+    if (statusF === "sale" && !c.for_sale) return false;
+    if (statusF === "trade-sale" && !c.for_trade && !c.for_sale) return false;
     return true;
   });
 }
@@ -735,6 +739,8 @@ function tileMarkup(c) {
   if (c.quantity > 1) badges.push(`<span class="badge">×${c.quantity}</span>`);
   if (c.condition && c.condition !== "NM")
     badges.push(`<span class="cond" title="${COND_NAME[c.condition] || c.condition}">${c.condition}</span>`);
+  if (c.for_trade) badges.push(`<span class="badge trade">TRADE</span>`);
+  if (c.for_sale) badges.push(`<span class="badge sale">SELL</span>`);
   return `<div class="card-tile${c.foil ? " is-foil" : ""}" data-cid="${c.id}" title="${esc(c.name)}">` +
     check + img +
     `<div class="scrim">` +
@@ -795,6 +801,8 @@ function renderLedger(cards, parent) {
       `<span class="card-cell"><span class="dot-color" style="background:${colorDot(c)}"></span>` +
       `<span class="name"></span>` +
       (c.foil ? `<span class="foil-tag">FOIL</span>` : "") +
+      (c.for_trade ? `<span class="flag-tag trade">TRADE</span>` : "") +
+      (c.for_sale ? `<span class="flag-tag sale">SELL</span>` : "") +
       `<span class="gem ${c.rarity || "common"}"></span></span>` +
       `<span class="num">${esc((c.set_code || "").toUpperCase())} #${esc(c.collector_number || "?")}</span>` +
       `<span class="qty-cell">×${c.quantity}</span>` +
@@ -828,6 +836,7 @@ $("filter-rarity").onchange = () => { resetPaging(); renderLibrary(); };
 $("filter-color").onchange = () => { resetPaging(); renderLibrary(); };
 $("filter-foil").onchange = () => { resetPaging(); renderLibrary(); };
 $("filter-condition").onchange = () => { resetPaging(); renderLibrary(); };
+$("filter-status").onchange = () => { resetPaging(); renderLibrary(); };
 
 // Expand / collapse every group at once (library grouping only).
 function updateCollapseBtns() {
@@ -1086,6 +1095,20 @@ function openDetail(card) {
   $("detail-foil").checked = !!card.foil;
   $("detail-condition").value = card.condition || "NM";
   $("detail-qty").textContent = card.quantity || 1;
+  $("detail-paid").value = card.purchase_price != null ? card.purchase_price : "";
+  $("detail-trade").checked = !!card.for_trade;
+  $("detail-sale").checked = !!card.for_sale;
+  const gainEl = $("detail-gain");
+  if (card.purchase_price != null && card.unit_price != null) {
+    const diff = card.unit_price - card.purchase_price;
+    const pct = card.purchase_price ? (diff / card.purchase_price) * 100 : 0;
+    gainEl.textContent =
+      `Paid $${card.purchase_price.toFixed(2)} each · now $${card.unit_price.toFixed(2)} · ` +
+      (diff >= 0 ? "+$" : "−$") + Math.abs(diff).toFixed(2) +
+      ` (${pct >= 0 ? "+" : ""}${pct.toFixed(0)}%)`;
+  } else {
+    gainEl.textContent = "";
+  }
   $("detail-scryfall").href = card.scryfall_uri || "#";
   // cards without a library row id (e.g. from the wishlist) are view-only
   const canEdit = card.id != null;
@@ -1127,8 +1150,12 @@ $("detail-qty-plus").onclick = () => changeDetailQty(1);
 
 $("detail-save").onclick = async () => {
   if (!detailCard) return;
+  const paid = $("detail-paid").value;
   const body = { id: detailCard.id, foil: $("detail-foil").checked,
-                 condition: $("detail-condition").value };
+                 condition: $("detail-condition").value,
+                 purchase_price: paid === "" ? null : paid,
+                 for_trade: $("detail-trade").checked,
+                 for_sale: $("detail-sale").checked };
   if (pendingCard) body.card = pendingCard;
   const resp = await fetch("/api/update", {
     method: "POST",

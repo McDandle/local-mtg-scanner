@@ -41,7 +41,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 
 try:
     import segno  # QR code for phone pairing (optional: pip install segno)
@@ -163,6 +163,10 @@ def init_db():
                 quantity INTEGER NOT NULL DEFAULT 1,
                 added_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
             """
         )
         # migration: 3D card flip shows the back face of double-faced cards
@@ -174,6 +178,14 @@ def init_db():
         if "condition" not in cols:
             conn.execute(
                 "ALTER TABLE cards ADD COLUMN condition TEXT NOT NULL DEFAULT 'NM'")
+        if "purchase_price" not in cols:
+            conn.execute("ALTER TABLE cards ADD COLUMN purchase_price REAL")
+        if "for_trade" not in cols:
+            conn.execute(
+                "ALTER TABLE cards ADD COLUMN for_trade INTEGER NOT NULL DEFAULT 0")
+        if "for_sale" not in cols:
+            conn.execute(
+                "ALTER TABLE cards ADD COLUMN for_sale INTEGER NOT NULL DEFAULT 0")
         if deckbuilder is not None:
             deckbuilder.init_tables(conn)
 
@@ -1212,6 +1224,180 @@ def identify_card(image_path):
 
 # ---------------------------------------------------------------- handlers
 
+# ----------------------------------------------------- background refreshes
+# Collection and wishlist price refreshes run in background threads and
+# stream progress over SSE. They're triggered by the "Prices" button and by
+# the once-a-day auto-refresh loop started in __main__.
+_refresh_state = {"active": False}
+_refresh_lock = threading.Lock()
+AUTO_REFRESH_SEC = 24 * 3600
+
+
+def _meta_get(key, default=None):
+    with db_lock, db() as conn:
+        row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else default
+
+
+def _meta_set(key, value):
+    with db_lock, db() as conn:
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+
+def _mark_refreshed():
+    _meta_set("last_auto_refresh", str(time.time()))
+
+
+def _refresh_cards(ids, ts):
+    total = len(ids)
+    updated = 0
+    for i, sid in enumerate(ids, 1):
+        try:
+            card = P.get_card(sid)
+        except Exception:
+            card = None
+        if card:
+            s = P.summary(card)
+            with db_lock, db() as conn:
+                conn.execute(
+                    "UPDATE cards SET price_usd=?, price_usd_foil=?, "
+                    "price_updated_at=?, back_image_uri=? WHERE scryfall_id=?",
+                    (s["price_usd"], s["price_usd_foil"], ts,
+                     s.get("back_image_uri"), sid))
+                conn.execute(
+                    "INSERT INTO price_history (scryfall_id, recorded_at, "
+                    "usd, usd_foil) VALUES (?,?,?,?)",
+                    (sid, ts, s["price_usd"], s["price_usd_foil"]))
+            updated += 1
+        if i % 10 == 0 or i == total:
+            broadcast({"type": "price-progress", "done": i,
+                       "total": total, "updated": updated})
+    return updated
+
+
+def _refresh_wishlist(rows, ts):
+    alerts = []
+    for i, r in enumerate(rows, 1):
+        try:
+            card = P.get_card(r["scryfall_id"])
+        except Exception:
+            card = None
+        if card:
+            s = P.summary(card)
+            price = s.get("price_usd_foil") if r.get("foil") else s.get("price_usd")
+            with db_lock, db() as conn:
+                conn.execute(
+                    "UPDATE wishlist SET price_usd=?, price_usd_foil=?, "
+                    "image_uri=? WHERE id=?",
+                    (s.get("price_usd"), s.get("price_usd_foil"),
+                     s.get("image_uri"), r["id"]))
+                conn.execute(
+                    "INSERT INTO price_history (scryfall_id, recorded_at, "
+                    "usd, usd_foil) VALUES (?,?,?,?)",
+                    (r["scryfall_id"], ts, s.get("price_usd"),
+                     s.get("price_usd_foil")))
+            if (r.get("target_price") is not None and price is not None
+                    and price <= r["target_price"]):
+                alerts.append(r["name"])
+        if i % 5 == 0 or i == len(rows):
+            broadcast({"type": "wishlist-progress", "done": i,
+                       "total": len(rows)})
+    return alerts
+
+
+def run_price_refresh():
+    """Refresh all collection card prices in the background."""
+    with _refresh_lock:
+        if _refresh_state["active"]:
+            return {"error": "refresh already running"}
+        with db_lock, db() as conn:
+            ids = [r["scryfall_id"] for r in conn.execute(
+                "SELECT DISTINCT scryfall_id FROM cards")]
+        if not ids or not P.has_api:
+            return {"started": False, "total": len(ids)}
+        _refresh_state["active"] = True
+    _mark_refreshed()
+
+    def work():
+        try:
+            backup_db()
+            updated = _refresh_cards(ids, now_iso())
+            broadcast({"type": "price-done", "updated": updated})
+            broadcast({"type": "library-changed"})
+        finally:
+            with _refresh_lock:
+                _refresh_state["active"] = False
+
+    threading.Thread(target=work, daemon=True).start()
+    return {"started": True, "total": len(ids)}
+
+
+def run_wishlist_refresh():
+    """Refresh wishlist prices in the background; alerts broadcast over SSE."""
+    with _refresh_lock:
+        if _refresh_state["active"]:
+            return {"error": "refresh already running"}
+        with db_lock, db() as conn:
+            rows = [dict(r) for r in conn.execute("SELECT * FROM wishlist")]
+        if not rows:
+            return {"started": False}
+        _refresh_state["active"] = True
+
+    def work():
+        try:
+            alerts = _refresh_wishlist(rows, now_iso())
+            broadcast({"type": "wishlist-done", "alerts": alerts})
+        finally:
+            with _refresh_lock:
+                _refresh_state["active"] = False
+
+    threading.Thread(target=work, daemon=True).start()
+    return {"started": True}
+
+
+def run_daily_refresh():
+    """One-shot refresh of collection + wishlist prices (auto-refresh path)."""
+    with _refresh_lock:
+        if _refresh_state["active"]:
+            return
+        with db_lock, db() as conn:
+            ids = [r["scryfall_id"] for r in conn.execute(
+                "SELECT DISTINCT scryfall_id FROM cards")]
+            rows = [dict(r) for r in conn.execute("SELECT * FROM wishlist")]
+        _refresh_state["active"] = True
+
+    def work():
+        try:
+            ts = now_iso()
+            if ids and P.has_api:
+                updated = _refresh_cards(ids, ts)
+                broadcast({"type": "price-done", "updated": updated})
+            alerts = _refresh_wishlist(rows, ts) if rows else []
+            broadcast({"type": "wishlist-done", "alerts": alerts})
+            broadcast({"type": "library-changed"})
+        finally:
+            with _refresh_lock:
+                _refresh_state["active"] = False
+
+    threading.Thread(target=work, daemon=True).start()
+
+
+def auto_refresh_loop():
+    """Once-a-day background price refresh (collection + wishlist)."""
+    while True:
+        try:
+            last = _meta_get("last_auto_refresh")
+            due = last is None or time.time() - float(last) >= AUTO_REFRESH_SEC
+        except Exception:
+            due = False
+        if due:
+            run_daily_refresh()
+            _mark_refreshed()
+        time.sleep(3600)  # re-check hourly
+
+
 # "Plains 189", "spm 65", "The One Ring 001" — name-or-set + collector
 # number at the end of the search query.
 NUM_Q_RE = re.compile(r"^(.*?)\s*#?\s*(\d{1,4}[a-z]?)\s*$")
@@ -1614,63 +1800,31 @@ class Handler(BaseHTTPRequestHandler):
                 if cond in COND_MULT:
                     conn.execute("UPDATE cards SET condition=? WHERE id=?",
                                  (cond, card_id))
+            if not merged and "purchase_price" in body:
+                pp = body.get("purchase_price")
+                try:
+                    pp = float(pp) if pp not in (None, "") else None
+                except (TypeError, ValueError):
+                    pp = None
+                conn.execute("UPDATE cards SET purchase_price=? WHERE id=?",
+                             (pp, card_id))
+            if not merged and "for_trade" in body:
+                conn.execute("UPDATE cards SET for_trade=? WHERE id=?",
+                             (1 if body.get("for_trade") else 0, card_id))
+            if not merged and "for_sale" in body:
+                conn.execute("UPDATE cards SET for_sale=? WHERE id=?",
+                             (1 if body.get("for_sale") else 0, card_id))
         broadcast({"type": "library-changed"})
         self.send_json({"ok": True})
 
-    _refresh_state = {"active": False}
-    _refresh_lock = threading.Lock()
-
     def api_refresh_prices(self):
         """Start a background refresh; progress streams over SSE."""
-        with self._refresh_lock:
-            if self._refresh_state["active"]:
-                self.send_json({"error": "refresh already running"}, 409)
-                return
-            with db_lock, db() as conn:
-                ids = [r["scryfall_id"] for r in conn.execute(
-                    "SELECT DISTINCT scryfall_id FROM cards")]
-            if not ids or not P.has_api:
-                self._refresh_state["active"] = False
-                self.send_json({"ok": True, "started": False, "total": len(ids)})
-                return
-            self._refresh_state["active"] = True
-
-        def work():
-            try:
-                backup_db()
-                ts = now_iso()
-                total = len(ids)
-                updated = 0
-                for i, sid in enumerate(ids, 1):
-                    try:
-                        card = P.get_card(sid)
-                    except Exception:
-                        card = None
-                    if card:
-                        s = P.summary(card)
-                        with db_lock, db() as conn:
-                            conn.execute(
-                                "UPDATE cards SET price_usd=?, price_usd_foil=?, "
-                                "price_updated_at=?, back_image_uri=? "
-                                "WHERE scryfall_id=?",
-                                (s["price_usd"], s["price_usd_foil"], ts,
-                                 s.get("back_image_uri"), sid))
-                            conn.execute(
-                                "INSERT INTO price_history (scryfall_id, recorded_at, "
-                                "usd, usd_foil) VALUES (?,?,?,?)",
-                                (sid, ts, s["price_usd"], s["price_usd_foil"]))
-                        updated += 1
-                    if i % 10 == 0 or i == total:
-                        broadcast({"type": "price-progress", "done": i,
-                                   "total": total, "updated": updated})
-                broadcast({"type": "price-done", "updated": updated})
-                broadcast({"type": "library-changed"})
-            finally:
-                with self._refresh_lock:
-                    self._refresh_state["active"] = False
-
-        threading.Thread(target=work, daemon=True).start()
-        self.send_json({"ok": True, "started": True, "total": len(ids)})
+        res = run_price_refresh()
+        if "error" in res:
+            self.send_json(res, 409)
+            return
+        self.send_json({"ok": True, "started": res["started"],
+                        "total": res.get("total", 0)})
 
     def api_history(self, sid):
         with db_lock, db() as conn:
@@ -1921,53 +2075,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_wishlist_refresh(self):
         """Background refresh of wishlist prices; alerts broadcast over SSE."""
-        with self._refresh_lock:
-            if self._refresh_state["active"]:
-                self.send_json({"error": "refresh already running"}, 409)
-                return
-            with db_lock, db() as conn:
-                rows = [dict(r) for r in conn.execute("SELECT * FROM wishlist")]
-            if not rows:
-                self.send_json({"ok": True, "started": False})
-                return
-            self._refresh_state["active"] = True
-
-        def work():
-            try:
-                ts = now_iso()
-                alerts = []
-                for i, r in enumerate(rows, 1):
-                    try:
-                        card = P.get_card(r["scryfall_id"])
-                    except Exception:
-                        card = None
-                    if card:
-                        s = P.summary(card)
-                        price = s.get("price_usd_foil") if r.get("foil") else s.get("price_usd")
-                        with db_lock, db() as conn:
-                            conn.execute(
-                                "UPDATE wishlist SET price_usd=?, price_usd_foil=?, "
-                                "image_uri=? WHERE id=?",
-                                (s.get("price_usd"), s.get("price_usd_foil"),
-                                 s.get("image_uri"), r["id"]))
-                            conn.execute(
-                                "INSERT INTO price_history (scryfall_id, recorded_at, "
-                                "usd, usd_foil) VALUES (?,?,?,?)",
-                                (r["scryfall_id"], ts, s.get("price_usd"),
-                                 s.get("price_usd_foil")))
-                        if (r.get("target_price") is not None and price is not None
-                                and price <= r["target_price"]):
-                            alerts.append(r["name"])
-                    if i % 5 == 0 or i == len(rows):
-                        broadcast({"type": "wishlist-progress", "done": i,
-                                   "total": len(rows)})
-                broadcast({"type": "wishlist-done", "alerts": alerts})
-            finally:
-                with self._refresh_lock:
-                    self._refresh_state["active"] = False
-
-        threading.Thread(target=work, daemon=True).start()
-        self.send_json({"ok": True, "started": True})
+        res = run_wishlist_refresh()
+        if "error" in res:
+            self.send_json(res, 409)
+            return
+        self.send_json({"ok": True, "started": res["started"]})
 
     def api_wishlist_alerts(self):
         with db_lock, db() as conn:
@@ -1986,7 +2098,7 @@ class Handler(BaseHTTPRequestHandler):
 
         def card_value(c):
             p = c.get("price_usd_foil") if c["foil"] else c.get("price_usd")
-            return (p or 0) * c["quantity"]
+            return (p or 0) * c["quantity"] * cond_mult(c.get("condition"))
 
         with db_lock, db() as conn:
             cards = [dict(r) for r in conn.execute("SELECT * FROM cards")]
@@ -1996,23 +2108,30 @@ class Handler(BaseHTTPRequestHandler):
                 wl_count = conn.execute("SELECT COUNT(*) FROM wishlist").fetchone()[0]
             except Exception:
                 wl_count = 0
-        # value over time: for each card, last price per day × current qty
+        # value over time: forward-fill each card's price so every date
+        # shows the whole collection valued at its latest known price on-or-
+        # before that date (a partial refresh can't drag the curve down).
         by_sid = defaultdict(list)
         for r in hist:
             by_sid[r["scryfall_id"]].append(r)
         for v in by_sid.values():
             v.sort(key=lambda r: r["recorded_at"])
-        value_by_date = defaultdict(float)
-        for c in cards:
-            use = "usd_foil" if c["foil"] else "usd"
-            last = {}
-            for r in by_sid.get(c["scryfall_id"], []):
-                last[r["recorded_at"][:10]] = r.get(use)
-            for d, p in last.items():
-                if p is not None:
-                    value_by_date[d] += p * c["quantity"]
-        value_history = [{"date": d, "value": round(v, 2)}
-                         for d, v in sorted(value_by_date.items())]
+        dates = sorted({r["recorded_at"][:10] for r in hist})
+        value_history = []
+        for d in dates:
+            total = 0.0
+            for c in cards:
+                use = "usd_foil" if c["foil"] else "usd"
+                price = None
+                for r in by_sid.get(c["scryfall_id"], []):
+                    if r["recorded_at"][:10] > d:
+                        break
+                    v = r.get(use)
+                    if v is not None:
+                        price = v
+                if price is not None:
+                    total += price * c["quantity"] * cond_mult(c.get("condition"))
+            value_history.append({"date": d, "value": round(total, 2)})
 
         total_value = round(sum(card_value(c) for c in cards), 2)
         total_cards = sum(c["quantity"] for c in cards)
@@ -2081,9 +2200,64 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 commanders = []
 
+        # cost basis, trade/sale value, and price movers
+        total_paid = 0.0
+        trade_value = sale_value = 0.0
+        for c in cards:
+            v = card_value(c)
+            if c.get("purchase_price") is not None:
+                total_paid += c["purchase_price"] * c["quantity"]
+            if c.get("for_trade"):
+                trade_value += v
+            if c.get("for_sale"):
+                sale_value += v
+        movers = []
+        for c in cards:
+            rows = sorted(by_sid.get(c["scryfall_id"], []),
+                          key=lambda r: r["recorded_at"])
+            if len(rows) < 2:
+                continue
+            last = rows[-1]
+            prev = None
+            for r in reversed(rows[:-1]):
+                if r["recorded_at"] != last["recorded_at"]:
+                    prev = r
+                    break
+            if prev is None:
+                continue
+            old, new = prev.get("usd"), last.get("usd")
+            if not old or not new:
+                continue
+            pct = (new - old) / old * 100
+            if abs(pct) < 0.5:
+                continue
+            movers.append({"scryfall_id": c["scryfall_id"], "name": c["name"],
+                           "set_name": c.get("set_name"),
+                           "set_code": c.get("set_code"),
+                           "collector_number": c.get("collector_number"),
+                           "rarity": c.get("rarity"),
+                           "image_uri": c.get("image_uri"),
+                           "scryfall_uri": c.get("scryfall_uri"),
+                           "price_usd": c.get("price_usd"),
+                           "price_usd_foil": c.get("price_usd_foil"),
+                           "pct": round(pct, 1), "old": round(old, 2),
+                           "new": round(new, 2)})
+        movers.sort(key=lambda m: m["pct"], reverse=True)
+        seen, picked = set(), []
+        for m in movers[:6] + movers[-6:]:
+            if m["scryfall_id"] not in seen:
+                seen.add(m["scryfall_id"])
+                picked.append(m)
+        movers = picked
+
         self.send_json({
             "total_value": total_value, "total_cards": total_cards,
             "wishlist_count": wl_count, "deck_count": len(commanders),
+            "total_paid": round(total_paid, 2),
+            "gain": round(total_value - total_paid, 2) if total_paid else None,
+            "trade_value": round(trade_value, 2),
+            "sale_value": round(sale_value, 2),
+            "movers": movers,
             "value_history": value_history,
             "rarity": [{"rarity": k, "count": v["count"], "value": round(v["value"], 2)}
                         for k, v in sorted(rarity.items())],
@@ -2101,7 +2275,8 @@ class Handler(BaseHTTPRequestHandler):
                 "SELECT * FROM cards ORDER BY name COLLATE NOCASE")]
         fields = ["scryfall_id", "name", "set_code", "set_name",
                   "collector_number", "rarity", "foil", "quantity",
-                  "condition", "price_usd", "price_usd_foil", "added_at"]
+                  "condition", "purchase_price", "for_trade", "for_sale",
+                  "price_usd", "price_usd_foil", "added_at"]
         buf = io.StringIO()
         w = csv.DictWriter(buf, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
@@ -2161,6 +2336,15 @@ class Handler(BaseHTTPRequestHandler):
             cond = (r.get("condition") or "").strip().upper()
             if cond not in COND_MULT:
                 cond = "NM"
+            pp = r.get("purchase_price")
+            try:
+                pp = float(pp) if pp not in (None, "") else None
+            except (TypeError, ValueError):
+                pp = None
+            trade = 1 if str(r.get("for_trade", "")).strip().lower() in (
+                "1", "true", "yes", "y") else 0
+            sale = 1 if str(r.get("for_sale", "")).strip().lower() in (
+                "1", "true", "yes", "y") else 0
             s = summary_map.get(sid)
             if s is None and sid:
                 card = fetch_card(sid)
@@ -2189,22 +2373,23 @@ class Handler(BaseHTTPRequestHandler):
             if s is None:
                 errors.append(name or sid or "?")
                 continue
-            resolved.append((s, foil, qty, cond))
+            resolved.append((s, foil, qty, cond, pp, trade, sale))
 
         added = updated = 0
         ts = now_iso()
         with db_lock, db() as conn:
-            for s, foil, qty, cond in resolved:
+            for s, foil, qty, cond, pp, trade, sale in resolved:
                 existing = conn.execute(
                     "SELECT id FROM cards WHERE scryfall_id=? AND foil=?",
                     (s["scryfall_id"], foil)).fetchone()
                 if existing:
                     conn.execute(
                         "UPDATE cards SET quantity=quantity+?, price_usd=?, "
-                        "price_usd_foil=?, price_updated_at=?, back_image_uri=? "
-                        "WHERE id=?",
+                        "price_usd_foil=?, price_updated_at=?, back_image_uri=?, "
+                        "purchase_price=?, for_trade=?, for_sale=? WHERE id=?",
                         (qty, s["price_usd"], s["price_usd_foil"], ts,
-                         s.get("back_image_uri"), existing["id"]))
+                         s.get("back_image_uri"), pp, trade, sale,
+                         existing["id"]))
                     updated += 1
                 else:
                     conn.execute(
@@ -2212,14 +2397,15 @@ class Handler(BaseHTTPRequestHandler):
                            set_name, collector_number, rarity, mana_cost,
                            type_line, colors, image_uri, scryfall_uri,
                            back_image_uri, foil, quantity, price_usd,
-                           price_usd_foil, price_updated_at, added_at, condition)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                           price_usd_foil, price_updated_at, added_at, condition,
+                           purchase_price, for_trade, for_sale)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (s["scryfall_id"], s["name"], s["set_code"],
                          s["set_name"], s["collector_number"], s["rarity"],
                          s["mana_cost"], s["type_line"], s["colors"],
                          s["image_uri"], s["scryfall_uri"],
                          s.get("back_image_uri"), foil, qty, s["price_usd"],
-                         s["price_usd_foil"], ts, ts, cond))
+                         s["price_usd_foil"], ts, ts, cond, pp, trade, sale))
                     added += 1
         backup_db()
         broadcast({"type": "library-changed"})
@@ -2347,4 +2533,5 @@ if __name__ == "__main__":
     if backend == "none":
         print("  WARNING: no OCR backend found — scanning disabled. Install "
               "Tesseract (brew/apt/choco install tesseract).")
+    threading.Thread(target=auto_refresh_loop, daemon=True).start()
     server.serve_forever()

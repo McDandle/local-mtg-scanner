@@ -38,8 +38,8 @@
       `<div class="card-float">
         <div class="flip3d" id="flip3d">
           <div class="flip3d-inner" id="flip3d-inner">
-            <div class="flip3d-face flip3d-front"><img id="detail-img" alt=""></div>
-            <div class="flip3d-face flip3d-back"><img id="detail-back" alt=""></div>
+            <div class="flip3d-face flip3d-front"><img id="detail-img" alt="" draggable="false"></div>
+            <div class="flip3d-face flip3d-back"><img id="detail-back" alt="" draggable="false"></div>
           </div>
           <p class="flip-hint">↻ drag to flip</p>
         </div>

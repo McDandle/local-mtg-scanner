@@ -27,7 +27,8 @@ data and prices come from the free [Scryfall](https://scryfall.com) API.
 - **Local-first** — the library is a single SQLite file. An optional offline
   card database (~60 MB) makes scanning and search work with no internet.
 - **Prices & history** — current prices per printing (foil and non-foil),
-  snapshotted over time with per-card charts. Automatic backups.
+  snapshotted over time with per-card charts. Automatic backups. Prices
+  auto-refresh once a day in the background (plus the manual Prices button).
 - **Library tools** — grid/list views, grouping with expand/collapse-all,
   filters (rarity, color, finish, condition), sorting, batch
   select/edit/delete, oracle text &amp; rulings in the card editor, CSV
@@ -36,6 +37,12 @@ data and prices come from the free [Scryfall](https://scryfall.com) API.
   Near Mint by default) with condition-adjusted pricing: a Lightly Played
   card is valued at 90% of market, Damaged at 40%. Filter the library by
   condition and change it from any card's details.
+- **Purchased price &amp; gain/loss** — record what you paid per copy
+  (the *Paid* field in the card editor) to see your gain or loss against
+  the current value. Insights totals cost basis vs. value and lists the
+  biggest price gainers and losers since the last snapshot.
+- **Trade &amp; sell flags** — mark cards *For trade* or *For sell*,
+  filter the library by status, and see your trade/sale value in Insights.
 - **Deck Builder** — build decks out of your own cards: every deck slot is
   compared against the collection so you see exactly what you own vs. what
   you need to order, with a priced buy list, URL/precon/decklist

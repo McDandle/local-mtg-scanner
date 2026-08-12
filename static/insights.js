@@ -96,12 +96,33 @@ function render() {
     }
     // render at the container's real width so chart text keeps its px size
     vc.innerHTML = lineChart(pts, Math.max(300, vc.clientWidth));
+    const costNote = data.total_paid
+      ? ` · paid $${data.total_paid.toFixed(2)} · ` +
+        (data.gain >= 0 ? "+$" : "−$") + Math.abs(data.gain).toFixed(2)
+      : "";
     $("value-note").textContent =
       `First snapshot ${fmtDate(pts[0].t)} · ${pts.length} snapshots · ` +
-      `current $${data.total_value.toFixed(2)}`;
+      `current $${data.total_value.toFixed(2)}${costNote}`;
   };
   renderValueChart();
   if (window.ResizeObserver) new ResizeObserver(renderValueChart).observe(vc);
+
+  // gainers & losers
+  const movers = data.movers || [];
+  $("movers-note").textContent = movers.length
+    ? "(price change since the previous snapshot)"
+    : "(shows up after two price refreshes)";
+  $("movers").innerHTML = movers.length
+    ? movers.map((m) => {
+        const up = m.pct >= 0;
+        return `<div class="mover-row" data-sid="${esc(m.scryfall_id)}">` +
+          `<img loading="lazy" src="${imgUrl(m.image_uri || "")}">` +
+          `<div class="mini-main"><b>${esc(m.name)}</b>` +
+          `<small>${esc(m.set_name || "?")} · $${m.old.toFixed(2)} → $${m.new.toFixed(2)}</small></div>` +
+          `<span class="mover-pct ${up ? "up" : "down"}">${up ? "+" : ""}${m.pct}%</span></div>`;
+      }).join("")
+    : `<p class="dim">No price movement yet — refresh prices a couple of times to build history.</p>`;
+  wireCardClicks($("movers"), movers);
 
   // rarity
   const rarity = (data.rarity || []).map((r) => ({
