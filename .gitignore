@@ -32,3 +32,6 @@ Screenshot*
 # downloaded precon decklist cache (rebuilt on demand by the Deck Builder)
 precon_cache/
 precon_index.json
+
+# design handoff bundle (reference material for the v1.1.0 redesign)
+design_handoff_library_redesign/
