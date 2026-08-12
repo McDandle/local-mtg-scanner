@@ -26,7 +26,7 @@ function lineChart(pts) {
     `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
   const area = `${path} L${x(pts.length - 1).toFixed(1)},${H - padB} L${x(0).toFixed(1)},${H - padB} Z`;
   const dots = pts.length <= 90 ? pts.map((p, i) =>
-    `<circle cx="${x(i).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="2" fill="#4fc8cc">` +
+    `<circle cx="${x(i).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="2" fill="#7aa7e8">` +
     `<title>${fmtDate(p.t)} · $${p.v.toFixed(2)}</title></circle>`).join("") : "";
   const last = pts[pts.length - 1];
   const step = Math.max(1, Math.floor(pts.length / 6));
@@ -34,13 +34,13 @@ function lineChart(pts) {
     ? `<text x="${x(i).toFixed(1)}" y="${H - 14}" text-anchor="middle" font-size="10" fill="#8d97ab">${fmtDate(p.t)}</text>` : "").join("");
   return `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">
     <defs><linearGradient id="vg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#4fc8cc" stop-opacity=".35"/>
-      <stop offset="100%" stop-color="#4fc8cc" stop-opacity="0"/>
+      <stop offset="0%" stop-color="#7aa7e8" stop-opacity=".35"/>
+      <stop offset="100%" stop-color="#7aa7e8" stop-opacity="0"/>
     </linearGradient></defs>
     <path d="${area}" fill="url(#vg)"/>
-    <path d="${path}" fill="none" stroke="#4fc8cc" stroke-width="2"/>
+    <path d="${path}" fill="none" stroke="#7aa7e8" stroke-width="2"/>
     ${dots}
-    <circle cx="${x(pts.length - 1)}" cy="${y(last.v)}" r="4" fill="#4fc8cc"><title>now: $${last.v.toFixed(2)}</title></circle>
+    <circle cx="${x(pts.length - 1)}" cy="${y(last.v)}" r="4" fill="#7aa7e8"><title>now: $${last.v.toFixed(2)}</title></circle>
     <text x="${padL}" y="16" fill="#8d97ab" font-size="11">high $${max.toFixed(2)}</text>
     <text x="${W - padR}" y="16" fill="#eef2f8" font-size="12" text-anchor="end">now $${last.v.toFixed(2)}</text>
     ${ticks}
@@ -79,7 +79,7 @@ async function load() {
       `current $${data.total_value.toFixed(2)}`;
   }
 
-  const recent = data.recent || [];
+  const recent = (data.recent || []).slice(0, 5);
   const box = $("recent");
   box.innerHTML = recent.length
     ? recent.map((c) =>

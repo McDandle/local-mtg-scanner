@@ -6,7 +6,10 @@ data and prices come from the free [Scryfall](https://scryfall.com) API.
 (Experimental support for Pokémon TCG and CSV-defined games is included via
 `CARD_TRACKER_GAME`, but MTG is the focus.)
 
-<p align="center"><img src="docs/demo.gif" width="420" alt="Library view on a phone — stats, filters, and card grid"></p>
+<p align="center"><img src="docs/home.png" width="420" alt="Home dashboard — portfolio value, recently added, quick access"></p>
+
+- **Home dashboard** — portfolio value over time, recently added cards,
+  and one-tap access to the library, decks and insights.
 
 - **Live scanning** — point your phone at cards; each one is OCR'd, matched
   to its *exact printing* (set code + collector number), and streamed to
@@ -30,6 +33,14 @@ data and prices come from the free [Scryfall](https://scryfall.com) API.
   compared against the collection so you see exactly what you own vs. what
   you need to order, with a priced buy list, Archidekt/precon/decklist
   import, legality checks, mana curve, and playtest draws.
+
+## See it in action
+
+<p align="center">
+  <img src="docs/card-flip.gif" width="230" alt="Card details with a 3D flip">
+  <img src="docs/deck-builder.gif" width="230" alt="Deck builder — owned vs. to order">
+  <img src="docs/insights.gif" width="230" alt="Collection insights and analytics">
+</p>
 
 ## Requirements
 

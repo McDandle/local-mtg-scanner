@@ -16,8 +16,6 @@
   </a>
   <div class="top-actions">
     <button id="wishlist-btn" class="ghost" title="Cards you want to buy">🛒 <span class="btn-label">Wishlist</span><span id="wishlist-badge" class="nav-badge hidden"></span></button>
-    <button id="pair-btn" class="ghost" title="Pair your phone as a scanner">📱 <span class="btn-label">Pair</span></button>
-    <button id="refresh-btn" class="ghost" title="Fetch fresh prices">↻ <span class="btn-label">Prices</span></button>
     <div class="nav-slot"></div>
   </div>
 </header>
@@ -52,6 +50,7 @@
         <button id="localdb-btn" class="ghost small">Download</button>
         <div id="localdb-bar-wrap" class="hidden"><div id="localdb-bar"></div></div>
       </div>
+      <button id="refresh-btn" class="ghost small" title="Fetch fresh prices">↻ Prices</button>
     </div>
   </section>
 
@@ -68,7 +67,8 @@
   <section id="scanner" class="panel">
     <h2 class="section-title"><span class="title-icon">📷</span> Scanner</h2>
     <div class="scan-actions">
-      <button id="live-btn" class="primary-btn">🎥 Start live scanning</button>
+      <button id="live-btn" class="primary-btn" title="Start live scanning">🎥 Live Scan</button>
+      <button id="pair-btn" class="ghost scan-pair" title="Pair your phone as a scanner">📱 Pair</button>
       <label id="photo-btn" for="camera-input">📷 Single photo
         <input id="camera-input" type="file" accept="image/*" capture="environment">
       </label>

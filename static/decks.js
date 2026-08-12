@@ -649,7 +649,7 @@
     return s;
   }
 
-  function lineChart(pts, stroke = "#4fc8cc") {
+  function lineChart(pts, stroke = "#7aa7e8") {
     const W = 460, H = 170, padL = 34, padR = 30, padT = 24, padB = 40;
     const vs = pts.map((p) => p.v);
     const min = Math.min(...vs), max = Math.max(...vs), span = max - min || 1;

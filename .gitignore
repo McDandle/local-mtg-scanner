@@ -24,8 +24,10 @@ __pycache__/
 .claude/
 *.log
 
-# raw screen recordings (compressed copy lives in docs/)
+# raw screen recordings & screenshots (compressed copies live in docs/)
 mobile library page.gif
+*.mov
+Screenshot*
 
 # downloaded precon decklist cache (rebuilt on demand by the Deck Builder)
 precon_cache/
