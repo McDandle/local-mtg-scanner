@@ -18,10 +18,10 @@ function fmtDate(iso) {
 }
 
 const RARITY_ORDER = ["common", "uncommon", "rare", "mythic", "special"];
-const RARITY_COLORS = { common: "#9aa3b2", uncommon: "#7ea8dd", rare: "#e8bf5f",
-                        mythic: "#e0704e", special: "#bd86e8" };
-const COLOR_COLORS = { W: "#f7f3d9", U: "#9bb9e0", B: "#a5a5a5", R: "#e07a5f",
-                       G: "#6fce8a", multicolor: "#c7bdfb", colorless: "#7d8798" };
+const RARITY_COLORS = { common: "#8b8f9c", uncommon: "#9db4c7", rare: "#c9a86a",
+                        mythic: "#c8724e", special: "#c8724e" };
+const COLOR_COLORS = { W: "#e8e2d0", U: "#7fb6d9", B: "#9a92a8", R: "#d98a7f",
+                       G: "#86b58a", multicolor: "#c9a86a", colorless: "#8b8f9c" };
 
 // horizontal bar list: rows with value bars
 function barList(rows, colorFn, valueKey = "value") {
@@ -35,8 +35,8 @@ function barList(rows, colorFn, valueKey = "value") {
 }
 
 // simple line chart
-function lineChart(pts) {
-  const W = 700, H = 210, padL = 52, padR = 24, padT = 22, padB = 36;
+function lineChart(pts, W = 700) {
+  const H = 210, padL = 52, padR = 24, padT = 22, padB = 36;
   const vs = pts.map((p) => p.v);
   const min = Math.min(...vs), max = Math.max(...vs), span = max - min || 1;
   const x = (i) => padL + (i / (pts.length - 1)) * (W - padL - padR);
@@ -45,23 +45,23 @@ function lineChart(pts) {
     `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
   const area = `${path} L${x(pts.length - 1).toFixed(1)},${H - padB} L${x(0).toFixed(1)},${H - padB} Z`;
   const dots = pts.length <= 90 ? pts.map((p, i) =>
-    `<circle cx="${x(i).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="2" fill="#7aa7e8">` +
+    `<circle class="chart-dot" cx="${x(i).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="3">` +
     `<title>${fmtDate(p.t)} · $${p.v.toFixed(2)}</title></circle>`).join("") : "";
   const last = pts[pts.length - 1];
   const step = Math.max(1, Math.floor(pts.length / 6));
   const ticks = pts.map((p, i) => (i % step === 0)
-    ? `<text x="${x(i).toFixed(1)}" y="${H - 14}" text-anchor="middle" font-size="10" fill="#8d97ab">${fmtDate(p.t)}</text>` : "").join("");
+    ? `<text x="${x(i).toFixed(1)}" y="${H - 14}" text-anchor="middle" class="chart-label">${fmtDate(p.t)}</text>` : "").join("");
   return `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">
     <defs><linearGradient id="vg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#7aa7e8" stop-opacity=".35"/>
-      <stop offset="100%" stop-color="#7aa7e8" stop-opacity="0"/>
+      <stop offset="0%" style="stop-color:var(--accent-soft);stop-opacity:.35"/>
+      <stop offset="100%" style="stop-color:var(--accent-soft);stop-opacity:0"/>
     </linearGradient></defs>
-    <path d="${area}" fill="url(#vg)"/>
-    <path d="${path}" fill="none" stroke="#7aa7e8" stroke-width="2"/>
+    <path d="${area}" class="chart-area" fill="url(#vg)"/>
+    <path d="${path}" class="chart-line"/>
     ${dots}
-    <circle cx="${x(pts.length - 1)}" cy="${y(last.v)}" r="4" fill="#7aa7e8"><title>now: $${last.v.toFixed(2)}</title></circle>
-    <text x="${padL}" y="16" fill="#8d97ab" font-size="11">high $${max.toFixed(2)}</text>
-    <text x="${W - padR}" y="16" fill="#eef2f8" font-size="12" text-anchor="end">now $${last.v.toFixed(2)}</text>
+    <circle class="chart-dot" cx="${x(pts.length - 1)}" cy="${y(last.v)}" r="4"><title>now: $${last.v.toFixed(2)}</title></circle>
+    <text x="${padL}" y="16" class="chart-label">high $${max.toFixed(2)}</text>
+    <text x="${W - padR}" y="16" class="chart-now" text-anchor="end">now $${last.v.toFixed(2)}</text>
     ${ticks}
   </svg>`;
 }
@@ -87,15 +87,21 @@ function render() {
 
   // value over time
   const pts = (data.value_history || []).map((h) => ({ t: h.date, v: h.value }));
-  if (pts.length < 2) {
-    $("value-chart").innerHTML =
-      `<p class="dim">Not enough price snapshots yet — hit “Prices” on the library page a few times over the coming days.</p>`;
-  } else {
-    $("value-chart").innerHTML = lineChart(pts);
+  const vc = $("value-chart");
+  const renderValueChart = () => {
+    if (pts.length < 2) {
+      vc.innerHTML =
+        `<p class="dim">Not enough price snapshots yet — hit “Prices” on the library page a few times over the coming days.</p>`;
+      return;
+    }
+    // render at the container's real width so chart text keeps its px size
+    vc.innerHTML = lineChart(pts, Math.max(300, vc.clientWidth));
     $("value-note").textContent =
       `First snapshot ${fmtDate(pts[0].t)} · ${pts.length} snapshots · ` +
       `current $${data.total_value.toFixed(2)}`;
-  }
+  };
+  renderValueChart();
+  if (window.ResizeObserver) new ResizeObserver(renderValueChart).observe(vc);
 
   // rarity
   const rarity = (data.rarity || []).map((r) => ({
@@ -119,7 +125,7 @@ function render() {
     ? colors.map((c) =>
         `<div class="hbar-row" title="${c.label}">` +
         `<span class="hbar-label">${esc(c.label)}</span>` +
-        `<span class="hbar-track"><i style="width:${(c.value / maxCol) * 100}%;background:${COLOR_COLORS[c.key] || "#7aa7e8"}"></i></span>` +
+        `<span class="hbar-track"><i style="width:${(c.value / maxCol) * 100}%;background:${COLOR_COLORS[c.key] || "#8b8f9c"}"></i></span>` +
         `<span class="hbar-val">${c.value}</span><span></span></div>`).join("")
     : `<p class="dim">No data yet.</p>`;
 
@@ -128,7 +134,7 @@ function render() {
     label: s.name, value: s.value, count: s.count,
   }));
   $("sets-chart").innerHTML = sets.length
-    ? barList(sets, () => "#7aa7e8")
+    ? barList(sets, () => "#c9a86a")
     : `<p class="dim">No data yet.</p>`;
 
   // set completion

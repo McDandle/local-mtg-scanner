@@ -31,8 +31,10 @@ function setBtnLabel(btn, text) {
 
 // ------------------------------------------------------------ state
 let libraryCards = [];
-const PAGE = 100;
-let pageSize = PAGE;
+const PAGE = 100;          // ledger sheet size
+const SHELF_PAGE = 12;     // tiles per shelf before the "+N more" tile
+let page = 0;              // ledger sheet index (0-based)
+let expandedWalls = new Set(); // shelf keys expanded into a full wall
 let viewMode = "grid";
 try { viewMode = localStorage.getItem("mtg_view") || "grid"; } catch (e) {}
 let collapsedGroups = {};
@@ -61,6 +63,18 @@ let liveDetected = null;   // currently detected card (for the confirm button)
 let confirmedId = null;    // card already confirmed this pass
 let audioCtx = null;
 
+// scan overlay switches (the design's .switch pills, no checkboxes)
+function switchOn(id) { return $(id).classList.contains("on"); }
+function setSwitch(id, on) { $(id).classList.toggle("on", on); }
+$("auto-add-switch").onclick = () => setSwitch("auto-add-switch", !switchOn("auto-add-switch"));
+$("scan-foil-switch").onclick = () => setSwitch("scan-foil-switch", !switchOn("scan-foil-switch"));
+
+function sessionNote() {
+  const n = $("scan-note");
+  if (n) n.textContent = sessionAdds ? `${sessionAdds} added this session` : "";
+  $("session-count").textContent = sessionAdds ? `${sessionAdds} this session` : "";
+}
+
 // ------------------------------------------------------------ stats
 const RARITY_RANK = { common: 0, uncommon: 1, rare: 2, mythic: 3, special: 4 };
 const RARITY_ORDER = ["common", "uncommon", "rare", "mythic", "special"];
@@ -82,27 +96,29 @@ function updateStats() {
     rar[k] = rar[k] || { count: 0, value: 0 };
     rar[k].count += c.quantity;
     rar[k].value += v;
-    if (!mvp || v > mvp.value) mvp = { name: c.name, value: v };
+    if (!mvp || v > mvp.value) mvp = { name: c.name, value: v, set: c.set_code || "" };
   }
-  $("sum-value").textContent = "$" + total.toFixed(2);
-  $("sum-count").textContent = count;
-  $("foil-value").textContent = "$" + foilVal.toFixed(0);
+  $("sum-value").textContent = "$" + total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  $("sum-count").textContent = count.toLocaleString();
+  $("foil-value").textContent = "$" + Math.round(foilVal).toLocaleString();
   $("mvp-card").textContent = mvp ? mvp.name : "—";
+  const sub = $("mvp-sub");
+  if (sub) sub.textContent = mvp ? `$${mvp.value.toFixed(2)} · ${(mvp.set || "").toUpperCase()}` : "";
 
   const bar = $("rarity-bar");
   bar.innerHTML = "";
   for (const r of RARITY_ORDER) {
     const d = rar[r];
     if (!d || !d.value) continue;
-    const seg = document.createElement("div");
-    seg.className = "rar-seg r-" + r;
+    const seg = document.createElement("span");
+    seg.className = r;
     seg.style.width = (d.value / (total || 1)) * 100 + "%";
     seg.title = `${r}: ${d.count} cards · $${d.value.toFixed(0)}`;
     bar.appendChild(seg);
   }
   const parts = RARITY_ORDER.filter((r) => rar[r] && rar[r].value != null)
-    .map((r) => `<b>${r}</b> $${rar[r].value.toFixed(0)}`);
-  $("breakdown").innerHTML = parts.length ? parts.join(" · ") : "";
+    .map((r) => `<i class="${r}"></i><b>${r}</b> $${rar[r].value.toFixed(0)}`);
+  $("breakdown").innerHTML = parts.length ? parts.join("") : "";
 }
 
 // ------------------------------------------------------------ scanner: single photo
@@ -249,6 +265,9 @@ async function maybeWishlistBought(res, qty) {
 $("live-btn").onclick = startLive;
 $("live-stop").onclick = stopLive;
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") stopLive(); });
+// mobile bottom dock mirrors the scan-bar actions
+$("dock-live").onclick = () => $("live-btn").click();
+$("dock-photo").onclick = () => document.getElementById("camera-input").click();
 
 async function startLive() {
   if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
@@ -271,6 +290,8 @@ async function startLive() {
   lastDetectedId = lastAddedId = null;
   liveDetected = confirmedId = null;
   stableCount = noMatchCount = 0;
+  sessionAdds = 0;
+  sessionNote();
   // iOS only allows audio started from a user gesture — prime the beep now.
   try {
     audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
@@ -392,28 +413,34 @@ function handleLiveResult(data) {
     const isExact = !!data.exact;
     if (isExact) {
       note = ` — ${(data.match.set_code || "?").toUpperCase()} #${data.match.collector_number} ✓`;
-    } else if ($("auto-add").checked) {
+    } else if (switchOn("auto-add-switch")) {
       note = " — auto-add needs the exact print; zoom in on the bottom number";
     } else if (/^Basic Land/.test(data.match.type_line || "")) {
-      note = " — zoom for the bottom-left number, or search name + number below";
+      note = " — zoom for the bottom-left number, or search name + number above";
     }
-    overlay.textContent = `${data.match.name}${price}${note}`;
+    const thumb = $("scan-thumb");
+    thumb.src = imgUrl(data.match.image_uri || "");
+    thumb.classList.remove("hidden");
+    $("scan-meta").textContent =
+      `${data.match.price_usd != null ? "$" + data.match.price_usd.toFixed(2) : "—"} · ${(data.match.set_code || "?").toUpperCase()} #${data.match.collector_number || "?"}`;
+    $("scan-match").classList.remove("hidden");
+    overlay.textContent = `${data.match.name}${note}`;
     overlay.classList.add("matched");
     // auto-add once per stable, newly-seen card — but only when the exact
     // printing is known (set + collector number), so partial name-only
     // matches never get added silently.
-    if ($("auto-add").checked && isExact && stableCount === 2 && id !== lastAddedId) {
+    if (switchOn("auto-add-switch") && isExact && stableCount === 2 && id !== lastAddedId) {
       lastAddedId = id;
       fetch("/api/add", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ card: data.match, foil: $("scan-foil").checked, quantity: 1 }),
+        body: JSON.stringify({ card: data.match, foil: switchOn("scan-foil-switch"), quantity: 1 }),
       }).then((r) => r.json()).then((res) => {
         if (res.ok) {
           confirmedId = id;
           updateScanConfirm();
           sessionAdds++;
-          $("session-count").textContent = sessionAdds + " added";
+          sessionNote();
           beep();
           toast("Auto-added " + res.name);
           maybeWishlistBought(res, 1);
@@ -431,6 +458,9 @@ function handleLiveResult(data) {
       lastAddedId = null;
       liveDetected = null;
       confirmedId = null;
+      $("scan-thumb").classList.add("hidden");
+      $("scan-meta").textContent = "";
+      $("scan-match").classList.add("hidden");
       overlay.textContent = "Point at a card…";
       overlay.classList.remove("matched");
       updateScanConfirm();
@@ -454,7 +484,7 @@ function updateScanConfirm() {
 $("scan-confirm").onclick = async () => {
   const card = liveDetected;
   if (!card || confirmedId === card.scryfall_id) return;
-  const foil = $("scan-foil").checked;
+  const foil = switchOn("scan-foil-switch");
   try {
     const resp = await fetch("/api/add", {
       method: "POST",
@@ -465,7 +495,7 @@ $("scan-confirm").onclick = async () => {
     if (res.ok) {
       confirmedId = card.scryfall_id;
       sessionAdds++;
-      $("session-count").textContent = sessionAdds + " added";
+      sessionNote();
       beep();
       updateScanConfirm();
       toast("Added " + res.name + (foil ? " ✦" : ""));
@@ -625,22 +655,38 @@ function renderLibrary() {
 
   list.innerHTML = "";
   if (!rows.length) {
-    list.innerHTML = `<p style="color:var(--dim);text-align:center;margin:34px 0">` +
+    list.innerHTML = `<p style="color:var(--text-dim);text-align:center;margin:34px 0">` +
       (libraryCards.length ? "No matches — try clearing the filters." : "Library is empty — scan your first card!") + `</p>`;
-    $("load-more").classList.add("hidden");
     return;
   }
 
   const group = $("group-select").value;
 
+  if (viewMode === "list") {
+    // ledger + sheet pager — there is no bottom of the page to reach
+    const totalSheets = Math.max(1, Math.ceil(rows.length / PAGE));
+    if (page >= totalSheets) page = totalSheets - 1;
+    const visible = rows.slice(page * PAGE, (page + 1) * PAGE);
+    renderLedger(visible, list);
+    const pager = document.createElement("div");
+    pager.className = "pager";
+    const from = rows.length ? page * PAGE + 1 : 0;
+    const to = Math.min(rows.length, (page + 1) * PAGE);
+    pager.innerHTML = `<span class="count">Sheet ${page + 1} of ${totalSheets} · ${from}–${to} of ${rows.length.toLocaleString()}</span>` +
+      `<button class="ghost small" id="pager-prev" ${page === 0 ? "disabled" : ""}>Previous sheet</button>` +
+      `<button class="ghost small" id="pager-next" ${page >= totalSheets - 1 ? "disabled" : ""}>Next sheet</button>`;
+    list.appendChild(pager);
+    const prev = pager.querySelector("#pager-prev");
+    prev.onclick = () => { page = Math.max(0, page - 1); renderLibrary(); };
+    pager.querySelector("#pager-next").onclick = () => { page = Math.min(totalSheets - 1, page + 1); renderLibrary(); };
+    requestAnimationFrame(() => window.scrollTo(0, scrollY));
+    return;
+  }
+
   if (group === "none") {
-    const showAll = rows.length <= PAGE;
-    const visible = showAll ? rows : rows.slice(0, pageSize);
-    $("load-more").classList.toggle("hidden", showAll || pageSize >= rows.length);
-    if (viewMode === "grid") renderGrid(visible, list);
-    else renderList(visible, list);
+    // no grouping → the whole library as one wall, no shelf paging
+    renderShelf(rows, list, null, true);
   } else {
-    $("load-more").classList.add("hidden");
     const groups = new Map();
     for (const c of rows) {
       const key = groupKey(group, c);
@@ -654,105 +700,127 @@ function renderLibrary() {
     for (const [key, cards] of entries) {
       const collapsed = !!collapsedGroups[key];
       const head = document.createElement("button");
-      head.className = "group-head" + (collapsed ? " collapsed" : "");
+      head.className = "group-head";
+      head.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      const code = group === "set" ? ((cards[0] && cards[0].set_code) || "").toUpperCase() : "";
       const val = cards.reduce((s, c) => s + (c.line_value || 0), 0);
-      head.innerHTML = `<span class="chev">${collapsed ? "▸" : "▾"}</span>` +
-        `<b></b><small>${cards.length} · $${val.toFixed(2)}</small>`;
-      head.querySelector("b").textContent = key;
+      head.innerHTML =
+        `<svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9l7 7 7-7"/></svg>` +
+        `<span class="name"></span>` +
+        (code ? `<span class="code">${esc(code)}</span>` : "") +
+        `<span class="rule"></span>` +
+        `<span class="group-meta">${cards.length} · $${val.toFixed(2)}</span>`;
+      head.querySelector(".name").textContent = key;
       head.onclick = () => {
-        collapsedGroups[key] = !collapsed;
+        collapsedGroups[key] = !collapsedGroups[key];
         try { localStorage.setItem("mtg_collapsed", JSON.stringify(collapsedGroups)); } catch (e) {}
         renderLibrary();
       };
       list.appendChild(head);
-      if (!collapsed) {
-        const body = document.createElement("div");
-        body.className = "group-body";
-        if (viewMode === "grid") renderGrid(cards, body);
-        else renderList(cards, body);
-        list.appendChild(body);
-      }
+      if (!collapsed) renderShelf(cards, list, key);
     }
   }
   requestAnimationFrame(() => window.scrollTo(0, scrollY));
 }
 
-function renderGrid(cards, parent) {
-  const grid = document.createElement("div");
-  grid.className = "card-grid";
-  for (const c of cards) {
-    const t = document.createElement("div");
-    t.className = "card-tile";
-    t.dataset.cid = c.id;
-    const check = batchMode
-      ? `<input type="checkbox" class="tile-check" ${selectedIds.has(c.id) ? "checked" : ""}>`
-      : "";
-    const img = `<div class="tile-img${c.foil ? " tile-foil-edge" : ""}">` +
-      check +
-      `<img loading="lazy" src="${imgUrl(c.image_uri || "")}" alt="">` +
-      (c.quantity > 1 ? `<span class="tile-qty">×${c.quantity}</span>` : "") +
-      (c.foil ? `<span class="tile-foil">${icon("foil")}</span>` : "") +
-      (c.unit_price != null ? `<span class="tile-price">$${c.unit_price.toFixed(2)}</span>` : "") +
-      (c.condition && c.condition !== "NM" ? `<span class="tile-cond" title="${COND_NAME[c.condition] || c.condition}">${c.condition}</span>` : "") +
-      `</div><div class="tile-name"></div>`;
-    t.innerHTML = img;
-    t.querySelector(".tile-name").textContent = c.name;
-    t.title = `${c.name} · ${c.quantity}×` + (c.condition && c.condition !== "NM" ? ` · ${c.condition}` : "");
-    const cb = t.querySelector(".tile-check");
-    if (cb) cb.onclick = (e) => { e.stopPropagation(); toggleSelect(c); };
-    t.onclick = () => { if (batchMode) toggleSelect(c); else openDetail(c); };
-    grid.appendChild(t);
-  }
-  parent.appendChild(grid);
+function tileMarkup(c) {
+  const check = batchMode
+    ? `<input type="checkbox" class="tile-check" ${selectedIds.has(c.id) ? "checked" : ""}>`
+    : "";
+  const img = c.image_uri
+    ? `<img loading="lazy" src="${imgUrl(c.image_uri)}" alt="">`
+    : `<div class="art-fallback"></div>`;
+  const badges = [];
+  if (c.foil) badges.push(`<span class="badge foil">FOIL</span>`);
+  if (c.quantity > 1) badges.push(`<span class="badge">×${c.quantity}</span>`);
+  if (c.condition && c.condition !== "NM")
+    badges.push(`<span class="cond" title="${COND_NAME[c.condition] || c.condition}">${c.condition}</span>`);
+  return `<div class="card-tile${c.foil ? " is-foil" : ""}" data-cid="${c.id}" title="${esc(c.name)}">` +
+    check + img +
+    `<div class="scrim">` +
+    (c.unit_price != null ? `<span class="price">$${c.unit_price.toFixed(2)}</span>` : `<span class="price">—</span>`) +
+    badges.join("") +
+    `<span class="gem ${c.rarity || "common"}"></span>` +
+    `</div></div>`;
 }
 
-function renderList(cards, parent) {
+function renderShelf(cards, parent, key, alwaysWall = false) {
+  const wall = alwaysWall || expandedWalls.has(key);
+  const container = document.createElement("div");
+  container.className = wall ? "group-wall" : "shelf";
+  const visible = wall ? cards : cards.slice(0, SHELF_PAGE);
+  for (const c of visible) {
+    const t = document.createElement("div");
+    t.innerHTML = tileMarkup(c);
+    const tile = t.firstChild;
+    const cb = tile.querySelector(".tile-check");
+    if (cb) cb.onclick = (e) => { e.stopPropagation(); toggleSelect(c); };
+    tile.onclick = () => { if (batchMode) toggleSelect(c); else openDetail(c); };
+    container.appendChild(tile);
+  }
+  if (!alwaysWall) {
+    const more = document.createElement("button");
+    more.className = "more";
+    if (wall) {
+      more.textContent = "▴ collapse";
+      more.onclick = () => { expandedWalls.delete(key); renderLibrary(); };
+    } else if (cards.length > SHELF_PAGE) {
+      more.textContent = `+${cards.length - SHELF_PAGE} more`;
+      more.onclick = () => { expandedWalls.add(key); renderLibrary(); };
+    } else {
+      more.style.display = "none";
+    }
+    container.appendChild(more);
+  }
+  parent.appendChild(container);
+}
+
+function renderLedger(cards, parent) {
+  const table = document.createElement("div");
+  table.className = "ledger";
+  const head = document.createElement("div");
+  head.className = "ledger-head";
+  head.innerHTML = `<span></span><span>Card</span><span>Set #</span><span>Qty</span><span>Finish</span><span>Cond</span><span>Each</span>`;
+  table.appendChild(head);
   for (const c of cards) {
     const row = document.createElement("div");
-    row.className = "lib-row";
+    row.className = "ledger-row";
     row.dataset.cid = c.id;
     const check = batchMode
       ? `<input type="checkbox" class="row-check" ${selectedIds.has(c.id) ? "checked" : ""}>`
       : "";
-    const price = c.unit_price != null ? "$" + c.unit_price.toFixed(2) : "—";
+    const unit = c.unit_price != null ? "$" + c.unit_price.toFixed(2) : "—";
     row.innerHTML =
-      check +
-      `<img loading="lazy" src="${imgUrl(c.image_uri || "")}" title="Card details">` +
-      `<div class="lib-main"><b></b>` +
-      (c.foil ? `<span class="foil-tag">${icon("foil")} foil</span>` : "") +
-      (c.condition && c.condition !== "NM" ? `<span class="foil-tag cond-tag" title="${COND_NAME[c.condition] || c.condition}">${c.condition}</span>` : "") +
-      `<small></small></div>` +
-      `<div class="lib-price"><b>$${(c.line_value || 0).toFixed(2)}</b><small></small></div>` +
-      `<div class="lib-qty"><button data-d="1">+</button><button data-d="-1">−</button></div>`;
-    row.querySelector(".lib-main b").textContent = c.name;
-    row.querySelector(".lib-main small").textContent =
-      `${c.set_name} · #${c.collector_number} · ${c.rarity}`;
-    row.querySelector(".lib-price small").textContent = `${c.quantity} × ${price}`;
+      `<span class="thumb">${check}${c.image_uri ? `<img loading="lazy" src="${imgUrl(c.image_uri)}" alt="">` : ""}</span>` +
+      `<span class="card-cell"><span class="dot-color" style="background:${colorDot(c)}"></span>` +
+      `<span class="name"></span>` +
+      (c.foil ? `<span class="foil-tag">FOIL</span>` : "") +
+      `<span class="gem ${c.rarity || "common"}"></span></span>` +
+      `<span class="num">${esc((c.set_code || "").toUpperCase())} #${esc(c.collector_number || "?")}</span>` +
+      `<span class="qty-cell">×${c.quantity}</span>` +
+      `<span class="finish-cell">${c.foil ? "Foil" : "—"}</span>` +
+      `<span class="cond-cell">${c.condition || "NM"}</span>` +
+      `<span class="ext">${unit}<small style="display:block;color:var(--text-faint);font-size:10px">${c.unit_price != null ? "= $" + (c.line_value || 0).toFixed(2) : ""}</small></span>`;
+    row.querySelector(".name").textContent = c.name;
     const cb = row.querySelector(".row-check");
     if (cb) cb.onclick = (e) => { e.stopPropagation(); toggleSelect(c); };
-    row.querySelector("img").onclick = () => { if (batchMode) toggleSelect(c); else openDetail(c); };
     row.onclick = (e) => {
-      if (!batchMode) return;
-      if (e.target.closest("button, input, select, a")) return;
-      toggleSelect(c);
+      if (e.target.closest("input, button, a")) return;
+      if (batchMode) toggleSelect(c); else openDetail(c);
     };
-    for (const btn of row.querySelectorAll(".lib-qty button")) {
-      btn.onclick = async () => {
-        const newQty = c.quantity + parseInt(btn.dataset.d);
-        if (newQty <= 0 && !confirm(`Remove ${c.name} from library?`)) return;
-        await fetch("/api/update", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: c.id, quantity: newQty }),
-        });
-        loadLibrary();
-      };
-    }
-    parent.appendChild(row);
+    table.appendChild(row);
   }
+  parent.appendChild(table);
 }
 
-function resetPaging() { pageSize = PAGE; }
+function colorDot(c) {
+  const cols = c.colors || "";
+  if (!cols.length) return "var(--mtg-c)";
+  if (cols.length > 1) return "var(--mtg-m)";
+  return "var(--mtg-" + cols.toLowerCase() + ")";
+}
+
+function resetPaging() { page = 0; }
 $("filter-input").oninput = () => { resetPaging(); renderLibrary(); };
 $("sort-select").onchange = () => { resetPaging(); renderLibrary(); };
 $("group-select").onchange = () => { resetPaging(); updateCollapseBtns(); renderLibrary(); };
@@ -760,7 +828,6 @@ $("filter-rarity").onchange = () => { resetPaging(); renderLibrary(); };
 $("filter-color").onchange = () => { resetPaging(); renderLibrary(); };
 $("filter-foil").onchange = () => { resetPaging(); renderLibrary(); };
 $("filter-condition").onchange = () => { resetPaging(); renderLibrary(); };
-$("load-more").onclick = () => { pageSize += PAGE; renderLibrary(); };
 
 // Expand / collapse every group at once (library grouping only).
 function updateCollapseBtns() {
@@ -1152,17 +1219,25 @@ async function showHistoryChart(card) {
     .map((h) => ({ t: h.recorded_at, v: card.foil ? h.usd_foil : h.usd }))
     .filter((p) => p.v != null);
   const box = $("detail-history");
-  if (pts.length < 2) {
-    box.innerHTML = `<p>Not enough price history yet — prices are snapshotted ` +
-      `each time you refresh. Current: ` +
-      (card.unit_price != null ? "$" + card.unit_price.toFixed(2) : "—") + `</p>`;
-  } else {
-    box.innerHTML = sparkline(pts);
+  const render = () => {
+    if (pts.length < 2) {
+      box.innerHTML = `<p>Not enough price history yet — prices are snapshotted ` +
+        `each time you refresh. Current: ` +
+        (card.unit_price != null ? "$" + card.unit_price.toFixed(2) : "—") + `</p>`;
+      return;
+    }
+    // render at the container's real width so chart text keeps its px size
+    box.innerHTML = sparkline(pts, Math.max(300, box.clientWidth));
+  };
+  render();
+  if (window.ResizeObserver && !box._ro) {
+    box._ro = new ResizeObserver(render);
+    box._ro.observe(box);
   }
 }
 
-function sparkline(pts) {
-  const W = 460, H = 170, padL = 30, padR = 30, padT = 24, padB = 40;
+function sparkline(pts, W = 460) {
+  const H = 170, padL = 30, padR = 30, padT = 24, padB = 40;
   const vs = pts.map((p) => p.v);
   const min = Math.min(...vs), max = Math.max(...vs), span = max - min || 1;
   const x = (i) => padL + (i / (pts.length - 1)) * (W - padL - padR);

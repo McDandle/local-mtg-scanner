@@ -60,29 +60,107 @@
     const box = $("decks-list");
     if (!decks.length) {
       box.innerHTML =
-        `<p style="color:var(--dim);text-align:center;margin:14px 0">No decks yet — ` +
+        `<p style="color:var(--text-dim);text-align:center;margin:14px 0">No decks yet — ` +
         `import one above, or create a deck and add cards by search.</p>`;
       return;
     }
     box.innerHTML = "";
     for (const d of decks) {
-      const row = document.createElement("div");
-      row.className = "deck-row";
+      const shelf = document.createElement("div");
+      shelf.className = "deck-shelf";
       const complete = d.missing <= 0;
-      const pct = d.card_count ? Math.round((d.owned / d.card_count) * 100) : 0;
-      row.innerHTML =
-        `<div class="deck-row-main"><b>${esc(d.name)}</b>` +
-        `<small>${esc(d.format || "No format")} · ${d.card_count} cards` +
-        (complete ? "" : ` · ${pct}% owned`) + `</small></div>` +
-        `<div class="deck-row-stats">` +
-        (complete
-          ? `<span class="full">✓ complete</span>`
-          : `<span class="own">own ${d.owned}</span><span class="miss">need ${d.missing}</span>` +
-            (d.missing_value > 0 ? `<span class="price">$${d.missing_value.toFixed(2)}</span>` : "")) +
-        `</div>`;
-      row.onclick = () => openDeck(d.id);
-      box.appendChild(row);
+      const head = document.createElement("button");
+      head.className = "deck-head";
+      head.innerHTML =
+        `<span class="dot-color" style="background:var(--accent)"></span>` +
+        `<span class="name"></span>` +
+        `<span class="meta">${esc(d.format || "No format")} · ${d.card_count} cards</span>` +
+        `<span class="rule"></span>` +
+        `<span class="state ${complete ? "" : "pending"}">${complete ? "✓ complete" : d.missing + " to order"}</span>` +
+        `<span class="open btn small">open editor →</span>`;
+      head.querySelector(".name").textContent = d.name;
+      head.onclick = () => openDeck(d.id);
+      shelf.appendChild(head);
+      if (d.cards && d.cards.length) {
+        const row = document.createElement("div");
+        row.className = "shelf";
+        for (const c of d.cards) {
+          const wrap = document.createElement("div");
+          wrap.innerHTML = deckTile(c);
+          const tile = wrap.firstChild;
+          tile.onclick = () => openDeck(d.id);
+          row.appendChild(tile);
+        }
+        // "View all" — expands the shelf into the full deck, grouped by type
+        const viewAll = document.createElement("button");
+        viewAll.className = "more";
+        viewAll.textContent = d.card_count > d.cards.length ? `View all ${d.card_count} →` : "View all →";
+        viewAll.onclick = async () => {
+          const wall = shelf.querySelector(".deck-wall");
+          if (wall) { wall.remove(); viewAll.textContent = "View all →"; return; }
+          viewAll.disabled = true;
+          viewAll.textContent = "…";
+          try {
+            const resp = await fetch("/api/decks/" + d.id);
+            const data = await resp.json();
+            if (data.deck && data.cards) {
+              const w = document.createElement("div");
+              w.className = "deck-wall";
+              renderDeckWall(data.cards, w);
+              shelf.appendChild(w);
+              viewAll.textContent = "▴ collapse";
+            } else {
+              viewAll.textContent = "View all →";
+            }
+          } catch (err) {
+            viewAll.textContent = "View all →";
+          }
+          viewAll.disabled = false;
+        };
+        row.appendChild(viewAll);
+        shelf.appendChild(row);
+      }
+      box.appendChild(shelf);
     }
+  }
+
+  // full deck grouped by classification — the "View all" wall under a shelf
+  function renderDeckWall(cards, container) {
+    const groups = new Map();
+    for (const c of cards) {
+      const t = deckType(c.type_line);
+      if (!groups.has(t)) groups.set(t, []);
+      groups.get(t).push(c);
+    }
+    for (const t of DECKVIEW_TYPES) {
+      const list = groups.get(t);
+      if (!list) continue;
+      list.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+      const q = list.reduce((s, c) => s + c.quantity, 0);
+      const v = list.reduce((s, c) => s + (c.unit_price || 0) * c.quantity, 0);
+      const head = document.createElement("div");
+      head.className = "deckview-group";
+      head.innerHTML = `<b>${t}</b><small>${q} · $${v.toFixed(2)}</small>`;
+      container.appendChild(head);
+      const grid = document.createElement("div");
+      grid.className = "deckview-grid";
+      for (const c of list) grid.appendChild(deckviewCell(c));
+      container.appendChild(grid);
+    }
+  }
+
+  function deckTile(c) {
+    const badges = [];
+    if (c.foil) badges.push(`<span class="badge foil">FOIL</span>`);
+    if (c.quantity > 1) badges.push(`<span class="badge">×${c.quantity}</span>`);
+    if (c.need > 0) badges.push(`<span class="badge order">+${c.need}</span>`);
+    return `<div class="card-tile${c.foil ? " is-foil" : ""}${c.need > 0 ? " is-missing" : ""}" title="${esc(c.name)}">` +
+      (c.image_uri ? `<img loading="lazy" src="${imgUrl(c.image_uri)}" alt="">` : `<div class="art-fallback"></div>`) +
+      `<div class="scrim">` +
+      (c.unit_price != null ? `<span class="price">$${c.unit_price.toFixed(2)}</span>` : `<span class="price">—</span>`) +
+      badges.join("") +
+      `<span class="gem ${c.rarity || "common"}"></span>` +
+      `</div></div>`;
   }
 
   function updateHero() {
@@ -735,7 +813,10 @@
         `<p class="dim">Not enough snapshots yet — value is recorded automatically ` +
         `(about once an hour), or tap <b>Record now</b>. Current: <b>$${data.current.toFixed(2)}</b></p>`;
     } else {
-      $("value-chart").innerHTML = lineChart(pts);
+      const vc = $("value-chart");
+      const render = () => { vc.innerHTML = lineChart(pts, Math.max(300, vc.clientWidth)); };
+      render();
+      if (window.ResizeObserver && !vc._ro) { vc._ro = new ResizeObserver(render); vc._ro.observe(vc); }
     }
     $("value-note").textContent =
       `Current deck value: $${data.current.toFixed(2)} · ${pts.length} snapshot${pts.length === 1 ? "" : "s"}`;
@@ -755,8 +836,8 @@
     return s;
   }
 
-  function lineChart(pts, stroke = "#7aa7e8") {
-    const W = 460, H = 170, padL = 34, padR = 30, padT = 24, padB = 40;
+  function lineChart(pts, W = 460) {
+    const H = 170, padL = 34, padR = 30, padT = 24, padB = 40;
     const vs = pts.map((p) => p.v);
     const min = Math.min(...vs), max = Math.max(...vs), span = max - min || 1;
     const x = (i) => padL + (i / (pts.length - 1)) * (W - padL - padR);
@@ -764,18 +845,18 @@
     const path = pts.map((p, i) =>
       `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
     const dots = pts.length <= 60 ? pts.map((p, i) =>
-      `<circle cx="${x(i).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="2.5" fill="${stroke}">` +
+      `<circle class="chart-dot" cx="${x(i).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="3">` +
       `<title>${fmtDate(p.t)} · $${p.v.toFixed(2)}</title></circle>`).join("") : "";
     const last = pts[pts.length - 1];
     return `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">
-      <path d="${path}" fill="none" stroke="${stroke}" stroke-width="2"/>
+      <path d="${path}" class="chart-line"/>
       ${dots}
-      <circle cx="${x(pts.length - 1)}" cy="${y(last.v)}" r="4" fill="${stroke}"><title>now: $${last.v.toFixed(2)}</title></circle>
-      <text x="${padL}" y="16" fill="#98a0b0" font-size="11">high $${max.toFixed(2)}</text>
-      <text x="${padL}" y="${H - padB + 16}" fill="#98a0b0" font-size="11">low $${min.toFixed(2)}</text>
-      <text x="${padL}" y="${H - 8}" fill="#98a0b0" font-size="10">${fmtDate(pts[0].t)}</text>
-      <text x="${W - padR}" y="${H - 8}" fill="#98a0b0" font-size="10" text-anchor="end">${fmtDate(last.t)}</text>
-      <text x="${W - padR}" y="16" fill="#eef0f4" font-size="12" text-anchor="end">now $${last.v.toFixed(2)}</text>
+      <circle class="chart-dot" cx="${x(pts.length - 1)}" cy="${y(last.v)}" r="4"><title>now: $${last.v.toFixed(2)}</title></circle>
+      <text x="${padL}" y="16" class="chart-label">high $${max.toFixed(2)}</text>
+      <text x="${padL}" y="${H - padB + 16}" class="chart-label">low $${min.toFixed(2)}</text>
+      <text x="${padL}" y="${H - 8}" class="chart-label">${fmtDate(pts[0].t)}</text>
+      <text x="${W - padR}" y="${H - 8}" class="chart-label" text-anchor="end">${fmtDate(last.t)}</text>
+      <text x="${W - padR}" y="16" class="chart-now" text-anchor="end">now $${last.v.toFixed(2)}</text>
     </svg>`;
   }
 
@@ -1006,44 +1087,6 @@
     }
   }
 
-  async function archidektSearch() {
-    const q = $("arch-q").value.trim();
-    if (q.length < 2) return;
-    const box = $("arch-results");
-    const note = $("arch-note");
-    note.classList.add("hidden");
-    box.innerHTML = `<p class="status">Searching Archidekt…</p>`;
-    try {
-      const resp = await fetch("/api/decks/archidekt/search?q=" + encodeURIComponent(q));
-      const data = await resp.json();
-      if (data.error) {
-        box.innerHTML = "";
-        note.textContent = data.error;
-        note.classList.remove("hidden");
-        return;
-      }
-      if (!data.decks.length) {
-        box.innerHTML = `<p class="status">No decks found for “${esc(q)}”.</p>`;
-        return;
-      }
-      box.innerHTML = "";
-      for (const d of data.decks) {
-        const row = document.createElement("div");
-        row.className = "arch-deck";
-        row.innerHTML =
-          `<div class="arch-deck-main"><b>${esc(d.name)}</b>` +
-          `<small>${esc(d.format || "No format")} · by ${esc(d.owner || "?")} · ${d.card_count || "?"} cards</small></div>` +
-          `<span class="arch-import-btn">Import</span>`;
-        row.onclick = () => importDeckUrl(String(d.id));
-        box.appendChild(row);
-      }
-    } catch (err) {
-      box.innerHTML = "";
-      note.textContent = "Search failed: " + err.message;
-      note.classList.remove("hidden");
-    }
-  }
-
   // ------------------------------------------------------------ events
   function connectEvents() {
     const es = new EventSource("/api/events");
@@ -1166,6 +1209,30 @@
     }
   }
 
+  // one visual-grid cell: the zooming card + fixed-size name/price below
+  function deckviewCell(c) {
+    const cell = document.createElement("div");
+    cell.className = "deckview-cell";
+    const tile = document.createElement("div");
+    tile.className = "deckview-tile" + (c.role === "commander" ? " commander" : "");
+    tile.innerHTML =
+      `<img loading="lazy" src="${imgUrl(c.image_uri || "")}">` +
+      `<span class="dv-qty-badge">×${c.quantity}</span>` +
+      (c.need > 0 ? `<span class="dv-need-badge">need ${c.need}</span>` : "");
+    cell.appendChild(tile);
+    const name = document.createElement("span");
+    name.className = "dv-name";
+    name.textContent = c.name;
+    cell.appendChild(name);
+    const price = document.createElement("span");
+    price.className = "dv-tile-price";
+    price.textContent = c.unit_price != null ? "$" + c.unit_price.toFixed(2) : "";
+    cell.appendChild(price);
+    cell.title = `${c.name} · ${c.set_name}`;
+    cell.onclick = () => openCardModal(c);
+    return cell;
+  }
+
   function renderDeckVisual(cards, body) {
     body.innerHTML = "";
     const grid = document.createElement("div");
@@ -1175,27 +1242,14 @@
       const tb = DECKVIEW_TYPES.indexOf(deckType(b.type_line));
       return ta - tb || (a.name || "").localeCompare(b.name || "");
     });
-    for (const c of ordered) {
-      const t = document.createElement("div");
-      t.className = "deckview-tile" + (c.role === "commander" ? " commander" : "");
-      t.innerHTML =
-        `<img loading="lazy" src="${imgUrl(c.image_uri || "")}">` +
-        `<span class="dv-qty-badge">×${c.quantity}</span>` +
-        (c.need > 0 ? `<span class="dv-need-badge">need ${c.need}</span>` : "") +
-        `<span class="dv-name">${esc(c.name)}</span>` +
-        `<span class="dv-tile-price">${c.unit_price != null ? "$" + c.unit_price.toFixed(2) : ""}</span>`;
-      t.title = `${c.name} · ${c.set_name} · $${((c.unit_price || 0) * c.quantity).toFixed(2)}`;
-      t.onclick = () => openCardModal(c);
-      grid.appendChild(t);
-    }
+    for (const c of ordered) grid.appendChild(deckviewCell(c));
     body.appendChild(grid);
   }
 
   // ------------------------------------------------------------ wire up
   function init() {
-    const newBtns = [document.getElementById("deck-new-btn"),
-                     document.getElementById("deck-new-btn2")];
-    for (const b of newBtns) b.onclick = newDeck;
+    const newBtn = document.getElementById("deck-new-btn");
+    newBtn.onclick = newDeck;
     $("deck-close-btn").onclick = closeDeckModal;
     $("deck-name").addEventListener("change", saveDeckMeta);
     $("deck-format").addEventListener("change", saveDeckMeta);
@@ -1246,10 +1300,6 @@
     $("arch-import").onclick = () => importDeckUrl($("arch-url").value.trim());
     $("arch-url").addEventListener("keydown", (e) => {
       if (e.key === "Enter") importDeckUrl($("arch-url").value.trim());
-    });
-    $("arch-go").onclick = archidektSearch;
-    $("arch-q").addEventListener("keydown", (e) => {
-      if (e.key === "Enter") archidektSearch();
     });
 
     // preconstructed deck search

@@ -1,11 +1,11 @@
 <!doctype html>
 <!-- Deck Builder page for Local MTG Scanner (MIT licensed, see LICENSE). -->
-<html lang="en">
+<html lang="en" data-theme="case">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#12151d">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2.6l2.3 7.1 7.1 2.3-7.1 2.3L12 21.4l-2.3-7.1L2.6 12l7.1-2.3z' fill='%23c9a86a'/%3E%3C/svg%3E">
+<meta name="theme-color" content="#161826">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2.6l2.3 7.1 7.1 2.3-7.1 2.3L12 21.4l-2.3-7.1L2.6 12l7.1-2.3z' fill='%239184d9'/%3E%3C/svg%3E">
 <title>MTG Tracker — Deck Builder</title>
 <link rel="stylesheet" href="/style.css">
 <link rel="stylesheet" href="/decks.css">
@@ -15,45 +15,33 @@
 
 <header class="topbar">
   <a class="brand" href="/" title="Home">
-    <span class="logo" aria-hidden="true"><svg class="ic"><use href="#i-decks"/></svg></span>
+    <span class="logo" aria-hidden="true"></span>
     <h1>Deck Builder</h1>
   </a>
-  <div class="top-actions">
-    <button id="deck-new-btn" class="ghost" title="Create an empty deck"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg> <span class="btn-label">New deck</span></button>
-    <div class="nav-slot"></div>
-  </div>
+  <nav class="nav-tabs" id="nav-tabs"></nav>
+  <div class="top-actions"></div>
 </header>
 
 <main>
-  <!-- hero stats -->
+  <!-- stat rail -->
   <section class="hero">
     <div class="hero-grid">
       <div class="stat"><span id="sum-decks">0</span><small>decks</small></div>
       <div class="stat"><span id="sum-cards">0</span><small>cards in decks</small></div>
       <div class="stat"><span id="sum-owned">0</span><small>owned</small></div>
-      <div class="stat stat-mvp"><span id="sum-missing">0</span><small>to order</small></div>
+      <div class="stat"><span id="sum-missing">0</span><small>to order</small></div>
     </div>
   </section>
 
-  <!-- import -->
+  <!-- import / create -->
   <section id="imports" class="panel">
-    <h2 class="section-title"><span class="title-icon"><svg class="ic"><use href="#i-tools"/></svg></span> Import a deck</h2>
     <div class="arch-row">
-      <input id="arch-url" type="search" placeholder="Deck URL — Archidekt, Moxfield, or TappedOut…"
-             autocomplete="off">
-      <button id="arch-import" class="primary">Import</button>
+      <input id="arch-url" type="search" placeholder="Import — Archidekt, Moxfield, or TappedOut URL…" autocomplete="off" aria-label="Import a deck URL">
+      <button id="arch-import" class="btn primary">Import</button>
+      <button id="deck-new-btn" class="ghost" title="Create an empty deck"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg> <span class="btn-label">New deck</span></button>
     </div>
-    <details class="arch-search">
-      <summary><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg> Search popular decks on Archidekt</summary>
-      <div class="arch-row">
-        <input id="arch-q" type="search" placeholder="Search decks — commander, archetype, card name…" autocomplete="off">
-        <button id="arch-go" class="ghost">Search</button>
-      </div>
-      <p id="arch-note" class="status hidden"></p>
-      <div id="arch-results" class="arch-results"></div>
-    </details>
     <details class="precon-search" id="precon-search">
-      <summary><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg> Search preconstructed decks (official MTGJSON decklists)</summary>
+      <summary><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg> Search preconstructed decks</summary>
       <div class="arch-row">
         <input id="precon-q" type="search" placeholder="Search decks — name, set, or commander (e.g. “chishiro”, “elven council”)…" autocomplete="off">
         <button id="precon-go" class="ghost">Search</button>
@@ -63,18 +51,16 @@
     </details>
     <p class="import-hint">
       Or <button id="deck-import-btn" class="linklike">paste a decklist</button>
-      as text (works for any deck, no account needed) — the URL box above also
-      accepts Moxfield and TappedOut deck links.
+      as text (works for any deck, no account needed).
     </p>
   </section>
 
   <!-- your decks -->
-  <section id="decks-panel" class="panel">
+  <section id="decks-panel">
     <div class="lib-head">
       <h2 class="section-title"><span class="title-icon"><svg class="ic"><use href="#i-decks"/></svg></span> Your decks</h2>
       <div class="lib-head-actions">
         <button id="planner-btn" class="ghost small" title="Cards needed across all decks"><svg class="ic" aria-hidden="true"><use href="#i-chart"/></svg> <span class="btn-label">Planner</span></button>
-        <button id="deck-new-btn2" class="ghost small"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg> <span class="btn-label">New deck</span></button>
       </div>
     </div>
     <div id="decks-list" class="decks-list"></div>

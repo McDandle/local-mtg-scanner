@@ -6,7 +6,7 @@ data and prices come from the free [Scryfall](https://scryfall.com) API.
 (Experimental support for Pokémon TCG and CSV-defined games is included via
 `CARD_TRACKER_GAME`, but MTG is the focus.)
 
-<p align="center"><img src="docs/home-dashboard.gif" width="260" alt="Home dashboard — portfolio value, quick access, card details"></p>
+<p align="center"><img src="docs/home-dashboard.gif" width="300" alt="Home dashboard — portfolio value, quick access to library, insights and decks"></p>
 
 - **Home dashboard** — portfolio value over time, recently added cards,
   and one-tap access to the library, decks and insights.
@@ -44,9 +44,8 @@ data and prices come from the free [Scryfall](https://scryfall.com) API.
 ## See it in action
 
 <p align="center">
-  <img src="docs/library.gif" width="230" alt="Library — scanner, filters, card condition, 3D flip">
-  <img src="docs/deck-builder.gif" width="230" alt="Deck builder — precon search, owned vs. to order">
-  <img src="docs/insights.gif" width="230" alt="Collection insights and analytics">
+  <img src="docs/library.gif" width="340" alt="Library — stat rail, shelves, filters, card details">
+  <img src="docs/deck-builder.gif" width="340" alt="Deck builder — your decks with view-all shelves">
 </p>
 
 ## Requirements

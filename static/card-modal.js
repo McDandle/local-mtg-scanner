@@ -45,19 +45,21 @@
         </div>
       </div>
       <div class="modal-box detail-box">
-        <div class="detail-info">
-          <h3 id="detail-name"></h3>
-          <p id="detail-set"></p>
-          <p id="detail-prices" class="price"></p>
-          <a id="detail-scryfall" target="_blank" rel="noopener">View on Scryfall ↗</a>
-        </div>
-        <div id="detail-history"></div>
-        <details class="oracle-box">
-          <summary>Oracle text &amp; rulings</summary>
-          <div id="oracle-body"><p class="dim">Loading…</p></div>
-        </details>
-        <div class="detail-actions">
-          <button id="detail-close" class="ghost">Close</button>
+        <div class="detail-facts">
+          <div class="detail-info">
+            <h3 id="detail-name"></h3>
+            <p id="detail-set"></p>
+            <p id="detail-prices" class="price"></p>
+            <a id="detail-scryfall" target="_blank" rel="noopener">View on Scryfall ↗</a>
+          </div>
+          <div id="detail-history"></div>
+          <details class="oracle-box">
+            <summary>Oracle text &amp; rulings</summary>
+            <div id="oracle-body"><p class="dim">Loading…</p></div>
+          </details>
+          <div class="detail-actions">
+            <button id="detail-close" class="ghost">Close</button>
+          </div>
         </div>
       </div>`;
     document.body.appendChild(modal);
@@ -109,8 +111,8 @@
     return modal;
   }
 
-  function lineChart(pts, stroke = "#6fce8a") {
-    const W = 460, H = 170, padL = 34, padR = 30, padT = 24, padB = 40;
+  function lineChart(pts, W = 460) {
+    const H = 170, padL = 34, padR = 30, padT = 24, padB = 40;
     const vs = pts.map((p) => p.v);
     const min = Math.min(...vs), max = Math.max(...vs), span = max - min || 1;
     const x = (i) => padL + (i / (pts.length - 1)) * (W - padL - padR);
@@ -118,18 +120,18 @@
     const path = pts.map((p, i) =>
       `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
     const dots = pts.length <= 60 ? pts.map((p, i) =>
-      `<circle cx="${x(i).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="2.5" fill="${stroke}">` +
+      `<circle class="chart-dot" cx="${x(i).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="3">` +
       `<title>${fmtDate(p.t)} · $${p.v.toFixed(2)}</title></circle>`).join("") : "";
     const last = pts[pts.length - 1];
     return `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">
-      <path d="${path}" fill="none" stroke="${stroke}" stroke-width="2"/>
+      <path d="${path}" class="chart-line"/>
       ${dots}
-      <circle cx="${x(pts.length - 1)}" cy="${y(last.v)}" r="4" fill="${stroke}"><title>now: $${last.v.toFixed(2)}</title></circle>
-      <text x="${padL}" y="16" fill="#8d97ab" font-size="11">high $${max.toFixed(2)}</text>
-      <text x="${padL}" y="${H - padB + 16}" fill="#8d97ab" font-size="11">low $${min.toFixed(2)}</text>
-      <text x="${padL}" y="${H - 8}" fill="#8d97ab" font-size="10">${fmtDate(pts[0].t)}</text>
-      <text x="${W - padR}" y="${H - 8}" fill="#8d97ab" font-size="10" text-anchor="end">${fmtDate(last.t)}</text>
-      <text x="${W - padR}" y="16" fill="#eef2f8" font-size="12" text-anchor="end">now $${last.v.toFixed(2)}</text>
+      <circle class="chart-dot" cx="${x(pts.length - 1)}" cy="${y(last.v)}" r="4"><title>now: $${last.v.toFixed(2)}</title></circle>
+      <text x="${padL}" y="16" class="chart-label">high $${max.toFixed(2)}</text>
+      <text x="${padL}" y="${H - padB + 16}" class="chart-label">low $${min.toFixed(2)}</text>
+      <text x="${padL}" y="${H - 8}" class="chart-label">${fmtDate(pts[0].t)}</text>
+      <text x="${W - padR}" y="${H - 8}" class="chart-label" text-anchor="end">${fmtDate(last.t)}</text>
+      <text x="${W - padR}" y="16" class="chart-now" text-anchor="end">now $${last.v.toFixed(2)}</text>
     </svg>`;
   }
 
@@ -140,13 +142,21 @@
     const pts = (data.history || [])
       .map((h) => ({ t: h.recorded_at, v: card.foil ? h.usd_foil : h.usd }))
       .filter((p) => p.v != null);
-    if (pts.length < 2) {
-      const cur = card.price_usd != null ? card.price_usd : card.unit_price;
-      box.innerHTML = `<p class="dim">Not enough price history yet — prices are ` +
-        `snapshotted each time you refresh. Current: ` +
-        (cur != null ? "$" + cur.toFixed(2) : "—") + `</p>`;
-    } else {
-      box.innerHTML = lineChart(pts);
+    const render = () => {
+      if (pts.length < 2) {
+        const cur = card.price_usd != null ? card.price_usd : card.unit_price;
+        box.innerHTML = `<p class="dim">Not enough price history yet — prices are ` +
+          `snapshotted each time you refresh. Current: ` +
+          (cur != null ? "$" + cur.toFixed(2) : "—") + `</p>`;
+        return;
+      }
+      // render at the container's real width so chart text keeps its px size
+      box.innerHTML = lineChart(pts, Math.max(300, box.clientWidth));
+    };
+    render();
+    if (window.ResizeObserver && !box._ro) {
+      box._ro = new ResizeObserver(render);
+      box._ro.observe(box);
     }
   }
 

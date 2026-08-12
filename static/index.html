@@ -1,47 +1,40 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="case">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#12151d">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2.6l2.3 7.1 7.1 2.3-7.1 2.3L12 21.4l-2.3-7.1L2.6 12l7.1-2.3z' fill='%23c9a86a'/%3E%3C/svg%3E">
-<title>MTG Tracker</title>
+<meta name="theme-color" content="#161826">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2.6l2.3 7.1 7.1 2.3-7.1 2.3L12 21.4l-2.3-7.1L2.6 12l7.1-2.3z' fill='%239184d9'/%3E%3C/svg%3E">
+<title>MTG Tracker — Library</title>
 <link rel="stylesheet" href="/style.css">
 </head>
-<body>
+<body data-page="library">
 <script src="/icons.js"></script>
 
 <header class="topbar">
   <a class="brand" href="/" title="Home">
-    <span class="logo" aria-hidden="true"><svg class="ic"><use href="#i-spark"/></svg></span>
-    <h1>MTG Tracker</h1>
+    <span class="logo" aria-hidden="true"></span>
+    <h1>Library</h1>
   </a>
+  <nav class="nav-tabs" id="nav-tabs"></nav>
   <div class="top-actions">
+    <input id="search-input" type="search" placeholder="Search cards — &quot;Plains 189&quot;…" aria-label="Search cards">
     <button id="wishlist-btn" class="ghost" title="Cards you want to buy"><svg class="ic" aria-hidden="true"><use href="#i-cart"/></svg> <span class="btn-label">Wishlist</span><span id="wishlist-badge" class="nav-badge hidden"></span></button>
+    <button id="offline-chip" class="offline-chip hidden" title="Offline card database"><span class="dot" aria-hidden="true"></span><span class="btn-label">Offline</span></button>
+    <button id="refresh-btn" class="ghost" title="Fetch fresh prices"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg> <span class="btn-label">Prices</span></button>
     <div class="nav-slot"></div>
   </div>
+  <div id="search-results"></div>
 </header>
 
 <main>
-  <!-- hero stats -->
+  <!-- stat rail -->
   <section class="hero">
     <div class="hero-grid">
-      <div class="stat">
-        <span id="sum-value">$0.00</span>
-        <small>collection value</small>
-      </div>
-      <div class="stat">
-        <span id="sum-count">0</span>
-        <small>cards</small>
-      </div>
-      <div class="stat">
-        <span id="foil-value">$0</span>
-        <small>foil value</small>
-      </div>
-      <div class="stat stat-mvp">
-        <span id="mvp-card">—</span>
-        <small>most valuable</small>
-      </div>
+      <div class="stat"><span id="sum-value">$0.00</span><small>collection value</small></div>
+      <div class="stat"><span id="sum-count">0</span><small>cards</small></div>
+      <div class="stat foil"><span id="foil-value">$0</span><small>foil value</small></div>
+      <div class="stat stat-mvp"><span id="mvp-card">—</span><small>most valuable</small><span class="sub" id="mvp-sub"></span></div>
     </div>
     <div id="rarity-bar" class="rarity-bar" aria-hidden="true"></div>
     <div class="hero-foot">
@@ -52,8 +45,6 @@
         <button id="localdb-btn" class="ghost small">Download</button>
         <div id="localdb-bar-wrap" class="hidden"><div id="localdb-bar"></div></div>
       </div>
-      <button id="offline-chip" class="offline-chip hidden" title="Offline card database"><span class="dot" aria-hidden="true"></span><span class="btn-label">Offline</span></button>
-      <button id="refresh-btn" class="ghost small" title="Fetch fresh prices"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg> <span class="btn-label">Prices</span></button>
     </div>
   </section>
 
@@ -66,44 +57,38 @@
     </div>
   </div>
 
-  <!-- scanner -->
-  <section id="scanner" class="panel">
-    <h2 class="section-title"><span class="title-icon"><svg class="ic"><use href="#i-camera"/></svg></span> Scanner</h2>
-    <div class="scan-actions">
-      <button id="live-btn" class="primary-btn" title="Start live scanning"><svg class="ic" aria-hidden="true"><use href="#i-video"/></svg> Live Scan</button>
-      <button id="pair-btn" class="ghost scan-pair" title="Pair your phone as a scanner"><svg class="ic" aria-hidden="true"><use href="#i-phone"/></svg> Pair</button>
-      <label id="photo-btn" for="camera-input"><svg class="ic" aria-hidden="true"><use href="#i-camera"/></svg> Single photo
-        <input id="camera-input" type="file" accept="image/*" capture="environment">
-      </label>
-    </div>
-    <div id="scan-status" class="status hidden"></div>
-    <div id="scan-result" class="scan-result hidden">
-      <img id="result-img" alt="">
-      <div class="result-info">
-        <h3 id="result-name"></h3>
-        <p id="result-set"></p>
-        <p id="result-price" class="price"></p>
-        <div class="add-controls">
-          <label class="foil-toggle"><input type="checkbox" id="result-foil"> Foil</label>
-          <div class="qty-picker">
-            <button id="qty-minus">−</button>
-            <span id="qty-value">1</span>
-            <button id="qty-plus">+</button>
-          </div>
-          <button id="add-btn" class="primary">Add to library</button>
-          <button id="result-wishlist" class="ghost" title="Add this card to your wishlist"><svg class="ic" aria-hidden="true"><use href="#i-cart"/></svg> <span class="btn-label">Wishlist</span></button>
-        </div>
-        <p id="wrong-card">Not right? Search below or scan again.</p>
-      </div>
-    </div>
-    <div class="manual-search">
-      <input id="search-input" type="search" placeholder="Search cards — try “Plains 189”…">
-      <div id="search-results"></div>
-    </div>
+  <!-- scan bar -->
+  <section id="scanner" class="scan-bar">
+    <button id="live-btn" class="btn primary" title="Start live scanning"><svg class="ic" aria-hidden="true"><use href="#i-video"/></svg> Live Scan</button>
+    <button id="pair-btn" class="btn" title="Pair your phone as a scanner"><svg class="ic" aria-hidden="true"><use href="#i-phone"/></svg> Pair</button>
+    <label id="photo-btn" class="btn" title="Scan a single photo"><svg class="ic" aria-hidden="true"><use href="#i-camera"/></svg> Photo
+      <input id="camera-input" type="file" accept="image/*" capture="environment">
+    </label>
+    <span id="scan-note" class="scan-note"></span>
   </section>
+  <div id="scan-status" class="status hidden"></div>
+  <div id="scan-result" class="scan-result hidden">
+    <img id="result-img" alt="">
+    <div class="result-info">
+      <h3 id="result-name"></h3>
+      <p id="result-set"></p>
+      <p id="result-price" class="price"></p>
+      <div class="add-controls">
+        <label class="foil-toggle"><input type="checkbox" id="result-foil"> Foil</label>
+        <div class="qty-picker">
+          <button id="qty-minus">−</button>
+          <span id="qty-value">1</span>
+          <button id="qty-plus">+</button>
+        </div>
+        <button id="add-btn" class="primary">Add to library</button>
+        <button id="result-wishlist" class="ghost" title="Add this card to your wishlist"><svg class="ic" aria-hidden="true"><use href="#i-cart"/></svg> <span class="btn-label">Wishlist</span></button>
+      </div>
+      <p id="wrong-card">Not right? Search above or scan again.</p>
+    </div>
+  </div>
 
   <!-- library -->
-  <section id="library" class="panel">
+  <section id="library">
     <div class="lib-head">
       <h2 class="section-title"><span class="title-icon"><svg class="ic"><use href="#i-cards"/></svg></span> Library</h2>
       <div class="lib-head-actions">
@@ -120,28 +105,22 @@
     </div>
     <div class="filter-row">
       <input id="filter-input" type="search" placeholder="Filter library…">
-      <select id="sort-select">
-        <option value="collection">Collection</option>
-        <option value="price-low">Price Low</option>
-        <option value="price-high">Price High</option>
-        <option value="recent">Recently Added</option>
-        <option value="set">Set</option>
-        <option value="rarity">Rarity</option>
+      <select id="sort-select" class="chip">
+        <option value="collection">Sort: Collection</option>
+        <option value="price-low">Sort: Price Low</option>
+        <option value="price-high">Sort: Price High</option>
+        <option value="recent">Sort: Recently Added</option>
+        <option value="set">Sort: Set</option>
+        <option value="rarity">Sort: Rarity</option>
       </select>
-    </div>
-    <div class="filter-row">
-      <select id="group-select">
+      <select id="group-select" class="chip">
         <option value="set" selected>Group: Set</option>
         <option value="rarity">Group: Rarity</option>
         <option value="color">Group: Color</option>
         <option value="letter">Group: A–Z</option>
         <option value="none">No grouping</option>
       </select>
-      <div class="seg collapse-seg hidden" id="collapse-seg">
-        <button id="expand-all" title="Expand all groups">▾ Expand</button>
-        <button id="collapse-all" title="Collapse all groups">▸ Collapse</button>
-      </div>
-      <select id="filter-rarity">
+      <select id="filter-rarity" class="chip">
         <option value="all">Any rarity</option>
         <option value="common">Common</option>
         <option value="uncommon">Uncommon</option>
@@ -149,7 +128,7 @@
         <option value="mythic">Mythic</option>
         <option value="special">Special</option>
       </select>
-      <select id="filter-color">
+      <select id="filter-color" class="chip">
         <option value="all">Any color</option>
         <option value="W">White</option>
         <option value="U">Blue</option>
@@ -159,12 +138,12 @@
         <option value="multi">Multicolor</option>
         <option value="colorless">Colorless</option>
       </select>
-      <select id="filter-foil">
+      <select id="filter-foil" class="chip">
         <option value="all">Any finish</option>
         <option value="foil">Foil</option>
         <option value="nonfoil">Non-foil</option>
       </select>
-      <select id="filter-condition">
+      <select id="filter-condition" class="chip">
         <option value="all">Any condition</option>
         <option value="NM">NM · Near Mint</option>
         <option value="LP">LP · Lightly Played</option>
@@ -172,9 +151,12 @@
         <option value="HP">HP · Heavily Played</option>
         <option value="D">D · Damaged</option>
       </select>
+      <div class="seg collapse-seg hidden" id="collapse-seg">
+        <button id="expand-all" title="Expand all groups">▾ Expand</button>
+        <button id="collapse-all" title="Collapse all groups">▸ Collapse</button>
+      </div>
     </div>
     <div id="library-list"></div>
-    <button id="load-more" class="ghost load-more hidden">Load more</button>
   </section>
 </main>
 
@@ -189,25 +171,30 @@
 
 <!-- fullscreen live scanner -->
 <div id="scan-overlay" class="hidden">
+  <video id="scan-video" playsinline muted autoplay></video>
+  <div class="scan-topbar">
+    <span class="scan-live">Live scan</span>
+    <span id="session-count" class="session-count"></span>
+    <button id="live-stop" class="btn">■ Stop</button>
+  </div>
   <div class="scan-frame">
-    <video id="scan-video" playsinline muted autoplay></video>
     <div id="scan-line" class="scan-line"></div>
     <div id="focus-ring" class="hidden"></div>
     <span class="scan-corner tl"></span><span class="scan-corner tr"></span>
     <span class="scan-corner bl"></span><span class="scan-corner br"></span>
   </div>
   <div class="scan-detect">
-    <div id="scan-overlay-text">Point at a card…</div>
-    <button id="scan-confirm" class="scan-confirm hidden"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg> <span class="scan-label">Add to library</span></button>
+    <img id="scan-thumb" class="hidden" alt="">
+    <div>
+      <div id="scan-overlay-text">Point at a card…</div>
+      <div class="meta" id="scan-meta"></div>
+      <div class="match hidden" id="scan-match">✓ matched</div>
+    </div>
   </div>
-  <div class="scan-topbar">
-    <span class="scan-live">● Live scan</span>
-    <button id="live-stop" class="danger">■ Stop</button>
-  </div>
+  <button id="scan-confirm" class="scan-confirm hidden"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg> <span class="scan-label">Add to library</span></button>
   <div class="scan-controls">
-    <label class="foil-toggle"><input type="checkbox" id="auto-add"> Auto-add on detect</label>
-    <label class="foil-toggle"><input type="checkbox" id="scan-foil"> Foil</label>
-    <span id="session-count" class="session-count"></span>
+    <label class="switch" id="auto-add-switch" title="Auto-add on detect"><i></i><span class="btn-label hidden">Auto-add</span></label>
+    <label class="switch" id="scan-foil-switch" title="Foil"><i></i><span class="btn-label hidden">Foil</span></label>
     <div id="zoom-row" class="hidden">
       <svg class="ic" aria-hidden="true"><use href="#i-search"/></svg>
       <input id="zoom-slider" type="range">
@@ -241,44 +228,46 @@
     </div>
   </div>
   <div class="modal-box detail-box">
-    <div class="detail-info">
-      <h3 id="detail-name"></h3>
-      <p id="detail-set"></p>
-      <p id="detail-prices" class="price"></p>
-      <a id="detail-scryfall" target="_blank" rel="noopener">View on Scryfall ↗</a>
-    </div>
-    <div class="detail-controls" id="detail-controls">
-      <label class="foil-toggle" title="Save applies the change"><input type="checkbox" id="detail-foil"> Foil</label>
-      <label class="cond-select" title="Card condition — prices adjust to match">
-        <select id="detail-condition">
-          <option value="NM">NM · Near Mint</option>
-          <option value="LP">LP · Lightly Played</option>
-          <option value="MP">MP · Moderately Played</option>
-          <option value="HP">HP · Heavily Played</option>
-          <option value="D">D · Damaged</option>
-        </select>
-      </label>
-      <div class="qty-picker">
-        <button id="detail-qty-minus">−</button>
-        <span id="detail-qty">1</span>
-        <button id="detail-qty-plus">+</button>
+    <div class="detail-facts">
+      <div class="detail-info">
+        <h3 id="detail-name"></h3>
+        <p id="detail-set"></p>
+        <p id="detail-prices" class="price"></p>
+        <a id="detail-scryfall" target="_blank" rel="noopener">View on Scryfall ↗</a>
       </div>
-      <button id="detail-wishlist" class="ghost" title="Add this card to your wishlist"><svg class="ic" aria-hidden="true"><use href="#i-cart"/></svg> <span class="btn-label">Wishlist</span></button>
-      <button id="detail-delete" class="danger">Delete</button>
-    </div>
-    <details class="printing-box">
-      <summary>Change printing</summary>
-      <input id="print-search" type="search" placeholder="Printings — name + number works too…">
-      <div id="print-results"></div>
-    </details>
-    <div id="detail-history"></div>
-    <details class="oracle-box">
-      <summary>Oracle text &amp; rulings</summary>
-      <div id="oracle-body"><p class="dim">Loading…</p></div>
-    </details>
-    <div class="detail-actions">
-      <button id="detail-save" class="primary">Save changes</button>
-      <button id="detail-close" class="ghost">Close</button>
+      <div class="detail-controls" id="detail-controls">
+        <label class="foil-toggle" title="Save applies the change"><input type="checkbox" id="detail-foil"> Foil</label>
+        <label class="cond-select" title="Card condition — prices adjust to match">
+          <select id="detail-condition">
+            <option value="NM">NM · Near Mint</option>
+            <option value="LP">LP · Lightly Played</option>
+            <option value="MP">MP · Moderately Played</option>
+            <option value="HP">HP · Heavily Played</option>
+            <option value="D">D · Damaged</option>
+          </select>
+        </label>
+        <div class="qty-picker">
+          <button id="detail-qty-minus">−</button>
+          <span id="detail-qty">1</span>
+          <button id="detail-qty-plus">+</button>
+        </div>
+        <button id="detail-wishlist" class="ghost" title="Add this card to your wishlist"><svg class="ic" aria-hidden="true"><use href="#i-cart"/></svg> <span class="btn-label">Wishlist</span></button>
+        <button id="detail-delete" class="danger">Delete</button>
+      </div>
+      <details class="printing-box">
+        <summary>Change printing</summary>
+        <input id="print-search" type="search" placeholder="Printings — name + number works too…">
+        <div id="print-results"></div>
+      </details>
+      <div id="detail-history"></div>
+      <details class="oracle-box">
+        <summary>Oracle text &amp; rulings</summary>
+        <div id="oracle-body"><p class="dim">Loading…</p></div>
+      </details>
+      <div class="detail-actions">
+        <button id="detail-save" class="primary">Save changes</button>
+        <button id="detail-close" class="ghost">Close</button>
+      </div>
     </div>
   </div>
 </div>
@@ -300,6 +289,12 @@
     <p id="wishlist-status" class="status hidden"></p>
     <div id="wishlist-items"></div>
   </div>
+</div>
+
+<!-- mobile one-handed dock (<= 640px) -->
+<div class="scan-dock hidden">
+  <button id="dock-live" class="btn primary"><svg class="ic" aria-hidden="true"><use href="#i-video"/></svg> Live Scan</button>
+  <button id="dock-photo" class="btn icon" title="Single photo"><svg class="ic" aria-hidden="true"><use href="#i-camera"/></svg></button>
 </div>
 
 <div id="toast" class="hidden"></div>

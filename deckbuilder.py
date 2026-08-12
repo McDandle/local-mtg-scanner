@@ -396,13 +396,21 @@ def _deck_stats(conn, deck_id, owned_by_id, owned_by_name):
 
 
 def _deck_summary(conn, deck, owned_by_id, owned_by_name):
-    stats, _ = _deck_stats(conn, deck["id"], owned_by_id, owned_by_name)
+    stats, cards = _deck_stats(conn, deck["id"], owned_by_id, owned_by_name)
     return {
         "id": deck["id"], "name": deck["name"], "format": deck["format"],
         "created_at": deck["created_at"], "updated_at": deck["updated_at"],
         "card_count": stats["total"], "owned": stats["owned"],
         "missing": stats["missing"], "missing_value": stats["missing_value"],
         "deck_value": stats["deck_value"],
+        # first cards for the index shelf (missing first, so the shelf
+        # reads as "what do I still need" at a glance)
+        "cards": [{
+            "id": c["id"], "name": c["name"], "image_uri": c["image_uri"],
+            "foil": c["foil"], "rarity": c["rarity"],
+            "quantity": c["quantity"], "unit_price": c["unit_price"],
+            "need": c["need"],
+        } for c in sorted(cards, key=lambda x: (x["need"] == 0, x["role"]))[:16]],
     }
 
 
