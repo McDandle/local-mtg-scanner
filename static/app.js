@@ -65,6 +65,10 @@ let audioCtx = null;
 const RARITY_RANK = { common: 0, uncommon: 1, rare: 2, mythic: 3, special: 4 };
 const RARITY_ORDER = ["common", "uncommon", "rare", "mythic", "special"];
 const COLOR_NAME = { W: "White", U: "Blue", B: "Black", R: "Red", G: "Green" };
+const COND_NAME = { NM: "Near Mint", LP: "Lightly Played", MP: "Moderately Played", HP: "Heavily Played", D: "Damaged" };
+// matches server COND_MULT — used only to label condition-adjusted prices
+const COND_MULT = { NM: 1, LP: .9, MP: .8, HP: .6, D: .4 };
+function condMult(c) { return COND_MULT[c.condition || "NM"] ?? 1; }
 
 function updateStats() {
   let total = 0, count = 0, foilVal = 0, mvp = null;
@@ -584,6 +588,7 @@ function filteredLibrary() {
   const rarity = $("filter-rarity").value;
   const color = $("filter-color").value;
   const foilF = $("filter-foil").value;
+  const condF = $("filter-condition").value;
   return libraryCards.filter((c) => {
     if (filter && !(c.name.toLowerCase().includes(filter) ||
                     (c.set_name || "").toLowerCase().includes(filter) ||
@@ -595,6 +600,7 @@ function filteredLibrary() {
     if (color !== "all" && color !== "multi" && color !== "colorless" && !cols.includes(color)) return false;
     if (foilF === "foil" && !c.foil) return false;
     if (foilF === "nonfoil" && c.foil) return false;
+    if (condF !== "all" && (c.condition || "NM") !== condF) return false;
     return true;
   });
 }
@@ -687,10 +693,11 @@ function renderGrid(cards, parent) {
       (c.quantity > 1 ? `<span class="tile-qty">×${c.quantity}</span>` : "") +
       (c.foil ? `<span class="tile-foil">${icon("foil")}</span>` : "") +
       (c.unit_price != null ? `<span class="tile-price">$${c.unit_price.toFixed(2)}</span>` : "") +
+      (c.condition && c.condition !== "NM" ? `<span class="tile-cond" title="${COND_NAME[c.condition] || c.condition}">${c.condition}</span>` : "") +
       `</div><div class="tile-name"></div>`;
     t.innerHTML = img;
     t.querySelector(".tile-name").textContent = c.name;
-    t.title = `${c.name} · ${c.quantity}×`;
+    t.title = `${c.name} · ${c.quantity}×` + (c.condition && c.condition !== "NM" ? ` · ${c.condition}` : "");
     const cb = t.querySelector(".tile-check");
     if (cb) cb.onclick = (e) => { e.stopPropagation(); toggleSelect(c); };
     t.onclick = () => { if (batchMode) toggleSelect(c); else openDetail(c); };
@@ -713,6 +720,7 @@ function renderList(cards, parent) {
       `<img loading="lazy" src="${imgUrl(c.image_uri || "")}" title="Card details">` +
       `<div class="lib-main"><b></b>` +
       (c.foil ? `<span class="foil-tag">${icon("foil")} foil</span>` : "") +
+      (c.condition && c.condition !== "NM" ? `<span class="foil-tag cond-tag" title="${COND_NAME[c.condition] || c.condition}">${c.condition}</span>` : "") +
       `<small></small></div>` +
       `<div class="lib-price"><b>$${(c.line_value || 0).toFixed(2)}</b><small></small></div>` +
       `<div class="lib-qty"><button data-d="1">+</button><button data-d="-1">−</button></div>`;
@@ -751,6 +759,7 @@ $("group-select").onchange = () => { resetPaging(); updateCollapseBtns(); render
 $("filter-rarity").onchange = () => { resetPaging(); renderLibrary(); };
 $("filter-color").onchange = () => { resetPaging(); renderLibrary(); };
 $("filter-foil").onchange = () => { resetPaging(); renderLibrary(); };
+$("filter-condition").onchange = () => { resetPaging(); renderLibrary(); };
 $("load-more").onclick = () => { pageSize += PAGE; renderLibrary(); };
 
 // Expand / collapse every group at once (library grouping only).
@@ -1004,9 +1013,11 @@ function openDetail(card) {
   $("detail-set").textContent =
     `${card.set_name || "?"} (${(card.set_code || "").toUpperCase()}) · #${card.collector_number || "?"} · ${card.rarity || ""}`;
   $("detail-prices").textContent =
-    `Non-foil ${card.price_usd != null ? "$" + card.price_usd.toFixed(2) : "—"}` +
-    ` · Foil ${card.price_usd_foil != null ? "$" + card.price_usd_foil.toFixed(2) : "—"}`;
+    `Non-foil ${card.price_usd != null ? "$" + (card.price_usd * condMult(card)).toFixed(2) : "—"}` +
+    ` · Foil ${card.price_usd_foil != null ? "$" + (card.price_usd_foil * condMult(card)).toFixed(2) : "—"}` +
+    ((card.condition || "NM") !== "NM" ? ` · ${COND_NAME[card.condition] || card.condition}` : "");
   $("detail-foil").checked = !!card.foil;
+  $("detail-condition").value = card.condition || "NM";
   $("detail-qty").textContent = card.quantity || 1;
   $("detail-scryfall").href = card.scryfall_uri || "#";
   // cards without a library row id (e.g. from the wishlist) are view-only
@@ -1049,7 +1060,8 @@ $("detail-qty-plus").onclick = () => changeDetailQty(1);
 
 $("detail-save").onclick = async () => {
   if (!detailCard) return;
-  const body = { id: detailCard.id, foil: $("detail-foil").checked };
+  const body = { id: detailCard.id, foil: $("detail-foil").checked,
+                 condition: $("detail-condition").value };
   if (pendingCard) body.card = pendingCard;
   const resp = await fetch("/api/update", {
     method: "POST",

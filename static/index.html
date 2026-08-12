@@ -164,6 +164,14 @@
         <option value="foil">Foil</option>
         <option value="nonfoil">Non-foil</option>
       </select>
+      <select id="filter-condition">
+        <option value="all">Any condition</option>
+        <option value="NM">NM · Near Mint</option>
+        <option value="LP">LP · Lightly Played</option>
+        <option value="MP">MP · Moderately Played</option>
+        <option value="HP">HP · Heavily Played</option>
+        <option value="D">D · Damaged</option>
+      </select>
     </div>
     <div id="library-list"></div>
     <button id="load-more" class="ghost load-more hidden">Load more</button>
@@ -241,6 +249,15 @@
     </div>
     <div class="detail-controls" id="detail-controls">
       <label class="foil-toggle" title="Save applies the change"><input type="checkbox" id="detail-foil"> Foil</label>
+      <label class="cond-select" title="Card condition — prices adjust to match">
+        <select id="detail-condition">
+          <option value="NM">NM · Near Mint</option>
+          <option value="LP">LP · Lightly Played</option>
+          <option value="MP">MP · Moderately Played</option>
+          <option value="HP">HP · Heavily Played</option>
+          <option value="D">D · Damaged</option>
+        </select>
+      </label>
       <div class="qty-picker">
         <button id="detail-qty-minus">−</button>
         <span id="detail-qty">1</span>

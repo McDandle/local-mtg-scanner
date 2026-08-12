@@ -6,7 +6,7 @@ data and prices come from the free [Scryfall](https://scryfall.com) API.
 (Experimental support for Pokémon TCG and CSV-defined games is included via
 `CARD_TRACKER_GAME`, but MTG is the focus.)
 
-<p align="center"><img src="docs/home.png" width="420" alt="Home dashboard — portfolio value, recently added, quick access"></p>
+<p align="center"><img src="docs/home-dashboard.gif" width="260" alt="Home dashboard — portfolio value, quick access, card details"></p>
 
 - **Home dashboard** — portfolio value over time, recently added cards,
   and one-tap access to the library, decks and insights.
@@ -29,8 +29,13 @@ data and prices come from the free [Scryfall](https://scryfall.com) API.
 - **Prices & history** — current prices per printing (foil and non-foil),
   snapshotted over time with per-card charts. Automatic backups.
 - **Library tools** — grid/list views, grouping with expand/collapse-all,
-  filters, sorting, batch select/edit/delete, oracle text &amp; rulings in
-  the card editor, CSV export/import, draggable 3D card flip.
+  filters (rarity, color, finish, condition), sorting, batch
+  select/edit/delete, oracle text &amp; rulings in the card editor, CSV
+  export/import, draggable 3D card flip.
+- **Card condition** — every card tracks its condition (NM/LP/MP/HP/D,
+  Near Mint by default) with condition-adjusted pricing: a Lightly Played
+  card is valued at 90% of market, Damaged at 40%. Filter the library by
+  condition and change it from any card's details.
 - **Deck Builder** — build decks out of your own cards: every deck slot is
   compared against the collection so you see exactly what you own vs. what
   you need to order, with a priced buy list, URL/precon/decklist
@@ -39,8 +44,8 @@ data and prices come from the free [Scryfall](https://scryfall.com) API.
 ## See it in action
 
 <p align="center">
-  <img src="docs/card-flip.gif" width="230" alt="Card details with a 3D flip">
-  <img src="docs/deck-builder.gif" width="230" alt="Deck builder — owned vs. to order">
+  <img src="docs/library.gif" width="230" alt="Library — scanner, filters, card condition, 3D flip">
+  <img src="docs/deck-builder.gif" width="230" alt="Deck builder — precon search, owned vs. to order">
   <img src="docs/insights.gif" width="230" alt="Collection insights and analytics">
 </p>
 

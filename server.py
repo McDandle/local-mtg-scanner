@@ -171,6 +171,9 @@ def init_db():
             conn.execute("ALTER TABLE cards ADD COLUMN back_image_uri TEXT")
         if "oracle_text" not in cols:
             conn.execute("ALTER TABLE cards ADD COLUMN oracle_text TEXT")
+        if "condition" not in cols:
+            conn.execute(
+                "ALTER TABLE cards ADD COLUMN condition TEXT NOT NULL DEFAULT 'NM'")
         if deckbuilder is not None:
             deckbuilder.init_tables(conn)
 
@@ -204,6 +207,16 @@ def backup_today_exists():
 
 def now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# Condition quality → price multiplier. Scryfall prices are Near Mint;
+# collection value scales down for worn cards.
+CONDITIONS = ("NM", "LP", "MP", "HP", "D")
+COND_MULT = {"NM": 1.0, "LP": 0.9, "MP": 0.8, "HP": 0.6, "D": 0.4}
+
+
+def cond_mult(condition):
+    return COND_MULT.get(condition or "NM", 1.0)
 
 
 def _oracle_text(c):
@@ -1398,9 +1411,12 @@ class Handler(BaseHTTPRequestHandler):
         total = 0.0
         count = 0
         for r in rows:
+            r["condition"] = r.get("condition") or "NM"
+            mult = cond_mult(r["condition"])
+            r["cond_mult"] = mult
             price = r["price_usd_foil"] if r["foil"] else r["price_usd"]
-            r["unit_price"] = price
-            r["line_value"] = round((price or 0) * r["quantity"], 2)
+            r["unit_price"] = round((price or 0) * mult, 2)
+            r["line_value"] = round((price or 0) * mult * r["quantity"], 2)
             total += r["line_value"]
             count += r["quantity"]
         self.send_json({"cards": rows, "total_value": round(total, 2),
@@ -1466,6 +1482,9 @@ class Handler(BaseHTTPRequestHandler):
         body = json.loads(self.read_body())
         foil = 1 if body.get("foil") else 0
         qty = max(1, int(body.get("quantity", 1)))
+        cond = body.get("condition") or "NM"
+        if cond not in COND_MULT:
+            cond = "NM"
         # The frontend usually already has the full card (from search or a
         # scan match) — use it directly so adding works instantly and even
         # when the card API is down. Only fall back to a lookup otherwise
@@ -1499,13 +1518,14 @@ class Handler(BaseHTTPRequestHandler):
                     """INSERT INTO cards (scryfall_id, name, set_code, set_name,
                        collector_number, rarity, mana_cost, type_line, colors,
                        image_uri, scryfall_uri, back_image_uri, foil, quantity,
-                       price_usd, price_usd_foil, price_updated_at, added_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       price_usd, price_usd_foil, price_updated_at, added_at,
+                       condition)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (sid, s["name"], s["set_code"], s["set_name"],
                      s["collector_number"], s["rarity"], s["mana_cost"],
                      s["type_line"], s["colors"], s["image_uri"],
                      s["scryfall_uri"], s.get("back_image_uri"), foil, qty,
-                     s["price_usd"], s["price_usd_foil"], ts, ts))
+                     s["price_usd"], s["price_usd_foil"], ts, ts, cond))
             conn.execute(
                 "INSERT INTO price_history (scryfall_id, recorded_at, usd, usd_foil) "
                 "VALUES (?,?,?,?)", (sid, ts, s["price_usd"], s["price_usd_foil"]))
@@ -1589,6 +1609,11 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     conn.execute("UPDATE cards SET quantity=? WHERE id=?",
                                  (qty, card_id))
+            if not merged and body.get("condition"):
+                cond = body["condition"]
+                if cond in COND_MULT:
+                    conn.execute("UPDATE cards SET condition=? WHERE id=?",
+                                 (cond, card_id))
         broadcast({"type": "library-changed"})
         self.send_json({"ok": True})
 
@@ -2076,7 +2101,7 @@ class Handler(BaseHTTPRequestHandler):
                 "SELECT * FROM cards ORDER BY name COLLATE NOCASE")]
         fields = ["scryfall_id", "name", "set_code", "set_name",
                   "collector_number", "rarity", "foil", "quantity",
-                  "price_usd", "price_usd_foil", "added_at"]
+                  "condition", "price_usd", "price_usd_foil", "added_at"]
         buf = io.StringIO()
         w = csv.DictWriter(buf, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
@@ -2133,6 +2158,9 @@ class Handler(BaseHTTPRequestHandler):
                 qty = max(1, int(r.get("quantity") or 1))
             except (TypeError, ValueError):
                 qty = 1
+            cond = (r.get("condition") or "").strip().upper()
+            if cond not in COND_MULT:
+                cond = "NM"
             s = summary_map.get(sid)
             if s is None and sid:
                 card = fetch_card(sid)
@@ -2161,12 +2189,12 @@ class Handler(BaseHTTPRequestHandler):
             if s is None:
                 errors.append(name or sid or "?")
                 continue
-            resolved.append((s, foil, qty))
+            resolved.append((s, foil, qty, cond))
 
         added = updated = 0
         ts = now_iso()
         with db_lock, db() as conn:
-            for s, foil, qty in resolved:
+            for s, foil, qty, cond in resolved:
                 existing = conn.execute(
                     "SELECT id FROM cards WHERE scryfall_id=? AND foil=?",
                     (s["scryfall_id"], foil)).fetchone()
@@ -2184,14 +2212,14 @@ class Handler(BaseHTTPRequestHandler):
                            set_name, collector_number, rarity, mana_cost,
                            type_line, colors, image_uri, scryfall_uri,
                            back_image_uri, foil, quantity, price_usd,
-                           price_usd_foil, price_updated_at, added_at)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                           price_usd_foil, price_updated_at, added_at, condition)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (s["scryfall_id"], s["name"], s["set_code"],
                          s["set_name"], s["collector_number"], s["rarity"],
                          s["mana_cost"], s["type_line"], s["colors"],
                          s["image_uri"], s["scryfall_uri"],
                          s.get("back_image_uri"), foil, qty, s["price_usd"],
-                         s["price_usd_foil"], ts, ts))
+                         s["price_usd_foil"], ts, ts, cond))
                     added += 1
         backup_db()
         broadcast({"type": "library-changed"})
