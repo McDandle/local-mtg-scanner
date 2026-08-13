@@ -51,6 +51,10 @@ def _deck_rows():
             "SELECT id, name FROM decks")]
 
 
+_GENERIC = {"deck", "decks", "commander", "commanders", "card",
+            "cards", "magic", "format", "legal", "banned", "build"}
+
+
 def _match_named(text, names):
     """Longest full-name or distinctive-word hit in text."""
     low = (text or "").lower()
@@ -62,7 +66,8 @@ def _match_named(text, names):
     best = None
     for n in names:
         for w in re.findall(r"[a-z0-9']+", n.lower()):
-            if len(w) >= 4 and w in low and (best is None or len(w) > best[0]):
+            if len(w) >= 4 and w not in _GENERIC and w in low \
+                    and (best is None or len(w) > best[0]):
                 best = (len(w), n)
     return best[1] if best else None
 
@@ -78,19 +83,89 @@ def _deck_entity(text):
     return None, None
 
 
-def _card_entity(text):
-    # Full-name only: word-match would map "Lightning Bolt" → "Lightning Strike".
-    low = (text or "").lower()
-    if not low:
+def _fold(s):
+    """Lowercase, drop punctuation so Roku's == rokus."""
+    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+
+def _tokens(s):
+    return [t for t in re.findall(r"[a-z0-9']+", (s or "").lower()) if t not in
+            {"a", "an", "the", "of", "and", "or", "to", "in", "on", "for",
+             "do", "i", "own", "have", "any", "my", "you", "how", "many",
+             "copies", "copy", "card", "cards"}]
+
+
+def _edits(a, b):
+    """Levenshtein, capped — enough for a missing 'the' or typo."""
+    if abs(len(a) - len(b)) > 6:
+        return 99
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1,
+                           prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def _fuzzy_card(query, names):
+    """Best owned-card name for a messy query. Exact fold first, then tokens."""
+    qf = _fold(query)
+    if not qf:
         return None
-    with _srv().db_lock, _srv().db() as conn:
-        names = [r["name"] for r in conn.execute(
-            "SELECT DISTINCT name FROM cards")]
     best = None
     for n in names:
-        if n.lower() in low and (best is None or len(n) > len(best)):
+        nf = _fold(n)
+        if nf and len(nf) >= 4 and (nf in qf or qf in nf) and (best is None or len(n) > len(best)):
             best = n
-    return best
+    if best:
+        return best
+    qt = _tokens(query)
+    if len(qt) < 2:
+        return None
+    scored = []
+    for n in names:
+        nt = _tokens(n)
+        if not nt:
+            continue
+        # every query token must almost-match some name token
+        used = set()
+        ok = True
+        dist = 0
+        for t in qt:
+            hit = None
+            for i, u in enumerate(nt):
+                if i in used:
+                    continue
+                d = 0 if t == u else _edits(t, u)
+                if d <= (1 if len(t) >= 4 else 0) and (hit is None or d < hit[0]):
+                    hit = (d, i)
+            if hit is None:
+                ok = False
+                break
+            used.add(hit[1])
+            dist += hit[0]
+        if ok:
+            extra = len(nt) - len(qt)  # prefer fewer leftover words
+            scored.append((dist, extra, -len(n), n))
+    if not scored:
+        return None
+    scored.sort()
+    return scored[0][3]
+
+
+def _card_names():
+    with _srv().db_lock, _srv().db() as conn:
+        return [r["name"] for r in conn.execute(
+            "SELECT DISTINCT name FROM cards")]
+
+
+def _card_entity(text):
+    # Folded containment first (rokus == Roku's). Word-match is unsafe
+    # (Lightning Bolt → Lightning Strike) so leftover typos go through
+    # token fuzzy against owned names only.
+    return _fuzzy_card(text, _card_names())
 
 
 def _commander_entity(text):
@@ -173,15 +248,17 @@ def _op_legality(deck_id, deck_name, fmt):
 
 
 def _op_owned(card_name):
-    key = _db()._norm_name(card_name)
+    resolved = _fuzzy_card(card_name, _card_names()) or card_name
+    key = _db()._norm_name(resolved)
     with _srv().db_lock, _srv().db() as conn:
         rows = [dict(r) for r in conn.execute(
             "SELECT name, set_code, set_name, collector_number, quantity, "
             "foil, price_usd, price_usd_foil FROM cards")]
-    matches = [r for r in rows if key in _db()._norm_name(r["name"])]
+    matches = [r for r in rows if key == _db()._norm_name(r["name"])
+               or key in _db()._norm_name(r["name"])]
     if not matches:
         return {"owned": False, "card": card_name}
-    return {"owned": True, "card": card_name,
+    return {"owned": True, "card": matches[0]["name"],
             "total_copies": sum(r["quantity"] for r in matches),
             "copies": [{"name": r["name"], "qty": r["quantity"],
                         "foil": bool(r["foil"]),
@@ -332,7 +409,12 @@ def _dispatch(intent, name, query):
     if intent == "decks":
         return _op_list_decks()
     if intent == "owned":
-        card = _owned_name(blob) or _owned_name(query) or (name or "").strip()
+        names = _card_names()
+        # Full question first — needle often drops words ("rokus mastery"
+        # came back as name="mastery"), and the query keeps them.
+        card = (_fuzzy_card(query, names) or
+                _fuzzy_card(name, names) or
+                _owned_name(query))
         if not card:
             return None
         return _op_owned(card)
@@ -399,6 +481,9 @@ _EXPORT_RE = re.compile(
 _SET_RE = re.compile(
     r"\bfrom\b|\bin set\b|cards? (from|in)|what do i have (from|in)|which set",
     re.I)
+_LEGAL_RE = re.compile(r"legal|banned|legality|\bformat\b", re.I)
+_STATUS_RE = re.compile(
+    r"missing|still need|need to buy|what do i (still )?need", re.I)
 
 
 def _route(text):
@@ -413,9 +498,9 @@ def _route(text):
         return _dispatch("planner", "", text)
     if _WISH_RE.search(t):
         return _dispatch("wishlist", "", text)
-    if re.search(r"legal|banned|legality|\bformat\b", t):
+    if _LEGAL_RE.search(t):
         return _dispatch("legal", "", text)
-    if re.search(r"missing|still need|need to buy|what do i (still )?need", t):
+    if _STATUS_RE.search(t):
         return _dispatch("status", "", text)
     m = _REC_RE.search(text)
     if m and m.group(1).strip():
@@ -608,11 +693,13 @@ def _format(results):
 
 
 def ask(text):
-    """One turn. Distinctive intents (cart/planner/wishlist) win first;
-    needle classifies the rest; keyword router is last resort."""
+    """One turn. Distinctive intents (cart/planner/wishlist/export/set/
+    legal/status) win first; needle classifies the rest; keyword router is
+    last resort."""
     t = text.lower()
     if (_CART_RE.search(t) or _PLAN_RE.search(t) or _WISH_RE.search(t)
-            or _EXPORT_RE.search(t) or _SET_RE.search(t)):
+            or _EXPORT_RE.search(t) or _SET_RE.search(t)
+            or _LEGAL_RE.search(t) or _STATUS_RE.search(t)):
         result = _route(text)
         if result is not None:
             return {"answer": _format([result]), "reasoning": "",
