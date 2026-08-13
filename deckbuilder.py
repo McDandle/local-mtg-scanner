@@ -1624,7 +1624,7 @@ _edhrec_lock = threading.Lock()
 
 def _edhrec_slug(name):
     """'Uril, the Miststalker' -> 'uril-the-miststalker'."""
-    s = re.sub(r"[^a-z0-9 ]", "", (name or "").lower())
+    s = re.sub(r"[^a-z0-9 -]", "", (name or "").lower())
     return re.sub(r" +", "-", s.strip())
 
 

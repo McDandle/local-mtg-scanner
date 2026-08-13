@@ -37,6 +37,14 @@
     if (d) d.remove();
   });
 
+  fetch("/api/info").then((r) => r.json()).then((info) => {
+    if (info.assistant && !document.querySelector('script[src="/chat.js"]')) {
+      const s = document.createElement("script");
+      s.src = "/chat.js";
+      document.body.appendChild(s);
+    }
+  }).catch(() => {});
+
   // legacy dropdown slot (pair/wishlist pages no longer use it)
   const slot = document.querySelector(".nav-slot");
   if (slot) slot.remove();

@@ -1,3 +1,4 @@
 # Everything runs on the Python 3.9+ standard library.
-# The one optional extra enables the phone-pairing QR code:
-segno
+# Optional extras (the tracker runs without them):
+segno            # phone-pairing QR code
+# cactus-needle  # assistant bubble — pip install cactus-needle

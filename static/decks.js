@@ -467,14 +467,12 @@
     copyText(buylistText(), "Buy list copied");
   }
 
-  function openTcgplayer() {
+  async function openTcgplayer() {
     if (!buylist) return;
-    // No foil marker: TCGplayer Mass Entry has no reliable foil syntax.
     const lines = buylist.items.map((i) =>
-      `${i.qty} ${i.name} ${(i.set_code || "").toUpperCase()} ${i.collector_number || ""}`);
-    const url = "https://www.tcgplayer.com/massentry?productline=Magic&catalogId=1&q=" +
-      encodeURIComponent(lines.join("\n"));
-    window.open(url, "_blank");
+      `${i.qty} ${(i.name || "").split(" // ")[0].trim()}`);
+    await copyText(lines.join("\n"), "List copied — paste into TCGplayer");
+    window.open("https://www.tcgplayer.com/massentry?productline=Magic&catalogId=1", "_blank");
   }
 
   function exportBuylistCsv() {

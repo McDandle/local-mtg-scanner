@@ -47,6 +47,10 @@ data and prices come from the free [Scryfall](https://scryfall.com) API.
   compared against the collection so you see exactly what you own vs. what
   you need to order, with a priced buy list, URL/precon/decklist
   import, legality checks, mana curve, and playtest draws.
+- **Assistant** *(optional)* — a ✦ bubble on every page. Ask in plain
+  English: do I own this card (and which set), what's missing from a deck,
+  is it legal, what to build around a commander, export a pasteable
+  decklist/collection/set, or copy a buy list and open TCGplayer Mass Entry.
 
 ## See it in action
 
@@ -63,6 +67,7 @@ data and prices come from the free [Scryfall](https://scryfall.com) API.
 | OCR | **Apple Vision** (auto-built, best quality) or Tesseract | **Tesseract**: `sudo apt install tesseract-ocr` | **Tesseract**: `choco install tesseract` (or the [UB-Mannheim installer](https://github.com/UB-Mannheim/tesseract/wiki)) |
 | Live camera (optional) | `openssl` (built-in) | `openssl` (built-in) | openssl (bundled with Git for Windows) |
 | QR pairing (optional) | `pip install segno` | same | same |
+| Assistant (optional) | `pip install cactus-needle` | same | same |
 
 On macOS the server compiles a tiny Swift helper (`ocr.swift`) on first run to
 use Apple's Vision framework — noticeably better than Tesseract on card
@@ -100,6 +105,42 @@ Auto-start: macOS users can adapt `com.mtgtracker.server.plist` (edit the
 two absolute paths, copy to `~/Library/LaunchAgents/`, `launchctl load` it);
 Linux users can wrap `python3 server.py` in a systemd user unit; Windows
 users can drop `start.bat` into shell:startup.
+
+## Assistant
+
+The ✦ bubble in the bottom-right is an optional natural-language layer over
+the tracker. Install [needle2](https://huggingface.co/Cactus-Compute/needle2)
+and restart the server:
+
+```bash
+pip install cactus-needle
+python3 server.py
+```
+
+If `cactus-needle` isn't installed the bubble stays hidden; everything else
+works as before. First run downloads a ~14 MB engine into
+`~/.cache/cactus-needle/` (one-time, then fully local).
+
+Needle2 is a 45M-param **tool-caller**, not a chatbot. It maps a sentence to
+one structured call (`intent` + optional `name`); the server looks the answer
+up in SQLite / EDHREC / the deck builder and formats the reply. Distinctive
+phrases (export, cart, wishlist, "from FDN") skip the model entirely.
+
+Things you can ask:
+
+- *do I own Sol Ring?* — copies with set code, collector number, price
+- *what do I have from FDN?* / *export my LTC cards*
+- *what am I still missing for my [deck]?*
+- *is my [deck] legal in commander?*
+- *what should I build around [commander]?* — EDHREC top/synergy cards
+- *export my collection* / *export my [deck]* — copyable `1 Name` list
+- *open a TCGplayer cart for [deck]* — copies the cheapest buy list and
+  opens a blank [Mass Entry](https://www.tcgplayer.com/massentry) page to
+  paste into (long lists don't fit in a URL)
+- *what am I short on across my decks?* / *show my wishlist*
+
+The module is drop-in removable: delete `assistant.py` and `static/chat.js`
+and the tracker is unchanged.
 
 ## How scanning works
 
@@ -205,6 +246,7 @@ Everything lives next to `server.py`:
 - `collection.db` — your library (SQLite). Back up this one file.
 - `backups/` — automatic snapshots (at startup, before refreshes/imports).
 - `local_cards.json`, `img_cache/` — optional offline database + images.
+- `assistant.py` — optional needle2 chat (hidden unless `cactus-needle` is installed).
 - CSV export/import from the Library header — works with plain name lists
   and CSVs from other tools too.
 
@@ -218,7 +260,8 @@ and use the offline-database Download button to index it.
 Card data and images come from [Scryfall](https://scryfall.com) (MTG) and
 [pokemontcg.io](https://pokemontcg.io) (Pokémon) — please respect their API
 guidelines (this server rate-limits and sends a proper User-Agent). QR codes
-by [segno](https://github.com/heuer/segno).
+by [segno](https://github.com/heuer/segno). Optional assistant by
+[Needle 2](https://huggingface.co/Cactus-Compute/needle2) / [Cactus Compute](https://github.com/cactus-compute/needle).
 
 Local MTG Scanner is unofficial Fan Content permitted under the
 [Fan Content Policy](https://company.wizards.com/en/legal/fancontentpolicy).

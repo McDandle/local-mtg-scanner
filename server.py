@@ -52,6 +52,11 @@ try:
     import deckbuilder  # optional Deck Builder module (drop-in removable)
 except ImportError:
     deckbuilder = None
+
+try:
+    import assistant  # optional needle2 chat assistant (pip install cactus-needle)
+except ImportError:
+    assistant = None
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -1469,6 +1474,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_file("insights.html", "text/html; charset=utf-8")
             elif path == "/insights.js":
                 self.send_file("insights.js", "application/javascript")
+            elif path == "/chat.html":
+                self.send_file("chat.html", "text/html; charset=utf-8")
+            elif path == "/chat.js":
+                self.send_file("chat.js", "application/javascript")
             elif path == "/api/insights":
                 self.api_insights()
             elif path == "/api/wishlist":
@@ -1531,6 +1540,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_wishlist_refresh()
             elif path == "/api/localdb/download":
                 self.api_localdb_download()
+            elif path == "/api/chat":
+                self.api_chat()
             elif deckbuilder is not None and deckbuilder.handle_post(self, path):
                 pass
             else:
@@ -1547,7 +1558,23 @@ class Handler(BaseHTTPRequestHandler):
                         "qr_available": segno is not None,
                         "https": TLS_AVAILABLE,
                         "ocr_backend": detect_ocr_backend(),
-                        "game": P.id})
+                        "game": P.id,
+                        "assistant": assistant is not None and assistant.available()})
+
+    def api_chat(self):
+        if assistant is None or not assistant.available():
+            self.send_json({"error": "Assistant not installed \u2014 pip install "
+                                     "cactus-needle, then restart"}, 501)
+            return
+        try:
+            body = json.loads(self.read_body())
+        except Exception:
+            body = {}
+        text = (body.get("text") or "").strip()
+        if not text:
+            self.send_json({"error": "empty message"}, 400)
+            return
+        self.send_json(assistant.ask(text))
 
     def api_qr(self):
         if segno is None:
