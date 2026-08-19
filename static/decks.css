@@ -246,6 +246,22 @@
 .deck-stats-box summary { cursor: pointer; color: var(--text-dim); font-size: 13.5px; padding: 2px 0; }
 .deck-stats-box summary:hover { color: var(--text); }
 #deck-stats-body { margin-top: 8px; }
+.stat-chip.win b { color: var(--ok); }
+.stat-chip.loss b { color: var(--danger); }
+.stat-chip.rate b { color: var(--accent); }
+.deck-record { border-bottom: 1px solid var(--line); padding: 8px 0; }
+.record-row { display: flex; align-items: stretch; }
+.record-row .stat-chip { flex: 1; }
+.record-btns { display: flex; align-items: center; gap: 6px; padding: 0 var(--space-3); border-right: 1px solid var(--line); }
+.record-prompt { display: flex; gap: 6px; padding: 8px var(--space-3); align-items: center; }
+.record-prompt input { flex: 1; min-width: 0; }
+.record-body { padding: 0 var(--space-3) 4px; }
+.record-head { font: 400 var(--fs-label)/1 var(--font-ui); letter-spacing: var(--ls-label); text-transform: uppercase; color: var(--text-faint); margin: 8px 0 4px; }
+.record-row-line { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 13.5px; }
+.record-row-line .opp { flex: 1; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.record-row-line .wl { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.record-row-line .del { background: none; border: 0; color: var(--text-faint); cursor: pointer; padding: 0 4px; font-size: 15px; line-height: 1; }
+.record-row-line .del:hover { color: var(--danger); }
 .statline { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--text-dim); font-size: 12.5px; margin-bottom: 8px; }
 .statline b { color: var(--text); font-size: 14px; }
 #deck-stats-body svg { width: 100%; height: auto; }

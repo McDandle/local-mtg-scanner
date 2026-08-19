@@ -490,6 +490,8 @@ select.chip {
 .seg button svg { stroke: var(--text-faint); }
 .seg button.active { background: var(--accent-tint); }
 .seg button.active svg { stroke: var(--accent-soft); }
+.game-switch button { padding: 6px 12px; line-height: 1.2; font-size: 12.5px; font-weight: 600; color: var(--text-faint); white-space: nowrap; }
+.game-switch button.active { color: var(--accent-soft); }
 .collapse-seg button { width: auto; padding: 0 10px; font-size: 11.5px; height: 32px; white-space: nowrap; }
 
 .filter-row {

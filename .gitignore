@@ -4,6 +4,9 @@ backups/
 img_cache/
 local_cards.json
 localdb_meta.json
+local_cards_*.json
+localdb_meta_*.json
+local_prices_*.json
 riftbound_cards.csv
 
 # generated TLS cert + marker

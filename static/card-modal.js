@@ -16,11 +16,23 @@
   function imgUrl(u) {
     return u ? "/api/img?u=" + encodeURIComponent(u) : "";
   }
+  function cardBack(card) {
+    if (card && card.back_image_uri) return imgUrl(card.back_image_uri);
+    const g = (card && card.game) || "mtg";
+    if (g === "pokemon") return "/pokemon-back.jpg";
+    if (g === "yugioh") return "/yugioh-back.jpg";
+    return "/cardback.jpg";
+  }
   function fmtDate(iso) {
     const d = new Date(iso);
     let s = (d.getMonth() + 1) + "/" + d.getDate();
     if (d.getFullYear() !== new Date().getFullYear()) s += "/" + String(d.getFullYear()).slice(2);
     return s;
+  }
+
+  function withGame(url, card) {
+    const g = (card && card.game) || "mtg";
+    return url + (url.includes("?") ? "&" : "?") + "game=" + encodeURIComponent(g);
   }
 
   let modal = null;
@@ -137,8 +149,10 @@
 
   async function showHistory(card) {
     const box = modal.querySelector("#detail-history");
-    const resp = await fetch("/api/history/" + card.scryfall_id);
+    const reqId = (box._reqId = (box._reqId || 0) + 1);
+    const resp = await fetch(withGame("/api/history/" + card.scryfall_id, card));
     const data = await resp.json();
+    if (box._reqId !== reqId) return;  // a newer card was opened — drop stale data
     const pts = (data.history || [])
       .map((h) => ({ t: h.recorded_at, v: card.foil ? h.usd_foil : h.usd }))
       .filter((p) => p.v != null);
@@ -154,7 +168,8 @@
       box.innerHTML = lineChart(pts, Math.max(300, box.clientWidth));
     };
     render();
-    if (window.ResizeObserver && !box._ro) {
+    if (window.ResizeObserver) {
+      if (box._ro) box._ro.disconnect();
       box._ro = new ResizeObserver(render);
       box._ro.observe(box);
     }
@@ -163,7 +178,7 @@
   async function showOracle(card) {
     const body = modal.querySelector("#oracle-body");
     try {
-      const resp = await fetch("/api/card/" + card.scryfall_id);
+      const resp = await fetch(withGame("/api/card/" + card.scryfall_id, card));
       const d = await resp.json();
       let html = "";
       if (d.oracle_text) html += `<div class="oracle-text">${esc(d.oracle_text)}</div>`;
@@ -181,7 +196,7 @@
     if (!card) return;
     inject();
     modal.querySelector("#detail-img").src = imgUrl(card.image_uri || "");
-    modal.querySelector("#detail-back").src = imgUrl(card.back_image_uri) || "/cardback.jpg";
+    modal.querySelector("#detail-back").src = cardBack(card);
     modal.querySelector("#detail-name").innerHTML =
       esc(card.name) + (card.foil ? " " + icon("foil") : "");
     modal.querySelector("#detail-set").textContent =
@@ -190,7 +205,17 @@
     const fp = card.price_usd_foil != null ? card.price_usd_foil : (card.foil ? card.unit_price : null);
     modal.querySelector("#detail-prices").textContent =
       `Non-foil ${np != null ? "$" + np.toFixed(2) : "—"} · Foil ${fp != null ? "$" + fp.toFixed(2) : "—"}`;
-    modal.querySelector("#detail-scryfall").href = card.scryfall_uri || "#";
+    modal.querySelector("#detail-scryfall").href = card.scryfall_uri || (() => {
+      const q = encodeURIComponent(card.name || "");
+      const g = card.game || "mtg";
+      if (g === "pokemon") return "https://www.tcgplayer.com/search/all/product?q=" + q;
+      if (g === "yugioh") return "https://www.ygoprodeck.com/search/?q=" + q;
+      return "#";
+    })();
+    const g = card.game || "mtg";
+    modal.querySelector("#detail-scryfall").textContent =
+      g === "pokemon" ? "View on TCGplayer ↗" :
+      g === "yugioh" ? "View on YGOPRODeck ↗" : "View on Scryfall ↗";
     modal.querySelector("#detail-history").innerHTML = `<p class="dim">Loading price history…</p>`;
     modal.querySelector("#oracle-body").innerHTML = `<p class="dim">Loading…</p>`;
     modal.classList.remove("hidden");

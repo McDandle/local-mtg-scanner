@@ -1,5 +1,5 @@
 /*
- * Deck Builder UI for Local MTG Scanner (MIT licensed, see LICENSE).
+ * Deck Builder UI for Local TCG Scanner (MIT licensed, see LICENSE).
  *
  * Runs on the dedicated /decks.html page (self-contained — no dependency
  * on app.js). Deck import from Archidekt by URL/ID, plus best-effort
@@ -36,6 +36,8 @@
 
   let decks = [];
   let currentDeck = null;   // {deck, stats, cards} from /api/decks/<id>
+  let recordData = null;    // win/loss record from /api/decks/<id>/matches
+  let matchResult = "win";  // which result the prompt is logging
   let deckSearchTimer = null;
   let buylist = null;
 
@@ -197,6 +199,7 @@
     $("deck-name").value = data.deck.name;
     $("deck-format").value = data.deck.format || "";
     renderDeck();
+    loadRecord();
     $("deck-modal").classList.remove("hidden");
   }
 
@@ -213,6 +216,7 @@
     if (data.error) return;
     currentDeck = data;
     renderDeck();
+    loadRecord();
   }
 
   function renderDeck() {
@@ -1244,6 +1248,77 @@
     body.appendChild(grid);
   }
 
+  // ------------------------------------------------------------ win/loss
+  async function loadRecord() {
+    if (!currentDeck) return;
+    try {
+      recordData = await fetch("/api/decks/" + currentDeck.deck.id + "/matches").then((r) => r.json());
+    } catch (e) {
+      recordData = { wins: 0, losses: 0, winrate: null, matchups: [], recent: [] };
+    }
+    renderRecord();
+  }
+
+  function renderRecord() {
+    if (!recordData) return;
+    $("deck-record-wins").textContent = recordData.wins || 0;
+    $("deck-record-losses").textContent = recordData.losses || 0;
+    $("deck-record-rate").textContent = recordData.winrate != null ? recordData.winrate + "%" : "—";
+    const body = $("deck-record-body");
+    const parts = [];
+    if ((recordData.matchups || []).length) {
+      parts.push('<div class="record-head">head to head</div>');
+      for (const m of recordData.matchups) {
+        const wr = m.winrate != null ? m.winrate + "%" : "—";
+        parts.push(`<div class="record-row-line"><span class="opp">${esc(m.opponent)}</span>` +
+                   `<span class="wl">${m.wins}W–${m.losses}L · ${wr}</span></div>`);
+      }
+    }
+    if ((recordData.recent || []).length) {
+      parts.push('<div class="record-head">recent</div>');
+      for (const r of recordData.recent) {
+        const label = r.result === "win" ? "W" : "L";
+        const opp = r.opponent ? " vs " + r.opponent : "";
+        parts.push(`<div class="record-row-line"><span class="opp">${label}${esc(opp)}</span>` +
+                   `<button class="del" data-mid="${r.id}" title="Delete">×</button></div>`);
+      }
+    }
+    body.innerHTML = parts.join("");
+    body.querySelectorAll(".del").forEach((b) => {
+      b.onclick = () => deleteMatch(parseInt(b.dataset.mid, 10));
+    });
+  }
+
+  async function deleteMatch(mid) {
+    await fetch("/api/decks/matches/delete", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: mid }),
+    });
+    loadRecord();
+  }
+
+  function showMatchPrompt(result) {
+    matchResult = result;
+    $("deck-loss-opponent").placeholder = result === "win"
+      ? "Beat which commander?" : "Lost to which commander?";
+    $("deck-loss-prompt").classList.remove("hidden");
+    $("deck-loss-opponent").focus();
+  }
+
+  function hideLossPrompt() {
+    $("deck-loss-prompt").classList.add("hidden");
+    $("deck-loss-opponent").value = "";
+  }
+
+  function saveMatch() {
+    const opp = $("deck-loss-opponent").value.trim();
+    if (!opp) { toast("Commander name required"); return; }
+    fetch("/api/decks/" + currentDeck.deck.id + "/matches", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ result: matchResult, opponent: opp }),
+    }).then(() => { hideLossPrompt(); loadRecord(); });
+  }
+
   // ------------------------------------------------------------ wire up
   function init() {
     const newBtn = document.getElementById("deck-new-btn");
@@ -1260,6 +1335,10 @@
     $("deck-recs-btn").onclick = openRecs;
     $("deck-value-btn").onclick = openValue;
     $("deck-playtest-btn").onclick = openPlaytest;
+    $("deck-win-btn").onclick = () => showMatchPrompt("win");
+    $("deck-loss-btn").onclick = () => showMatchPrompt("loss");
+    $("deck-loss-save").onclick = saveMatch;
+    $("deck-loss-cancel").onclick = hideLossPrompt;
     $("deck-add-collection-btn").onclick = addToCollection;
     $("deck-import-btn").onclick = openImport;
     $("deck-import-btn2").onclick = openImport;

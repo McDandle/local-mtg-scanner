@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#161826">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2.6l2.3 7.1 7.1 2.3-7.1 2.3L12 21.4l-2.3-7.1L2.6 12l7.1-2.3z' fill='%239184d9'/%3E%3C/svg%3E">
-<title>MTG Tracker — Library</title>
+<title>Card Tracker — Library</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body data-page="library">
@@ -18,6 +18,11 @@
   </a>
   <nav class="nav-tabs" id="nav-tabs"></nav>
   <div class="top-actions">
+    <div class="seg game-switch" id="game-switch" title="Switch game">
+      <button data-game="mtg" class="active">MTG</button>
+      <button data-game="pokemon">Pokémon</button>
+      <button data-game="yugioh">Yu-Gi-Oh!</button>
+    </div>
     <input id="search-input" type="search" placeholder="Search cards — &quot;Plains 189&quot;…" aria-label="Search cards">
     <button id="wishlist-btn" class="ghost" title="Cards you want to buy"><svg class="ic" aria-hidden="true"><use href="#i-cart"/></svg> <span class="btn-label">Wishlist</span><span id="wishlist-badge" class="nav-badge hidden"></span></button>
     <button id="offline-chip" class="offline-chip hidden" title="Offline card database"><span class="dot" aria-hidden="true"></span><span class="btn-label">Offline</span></button>
@@ -74,7 +79,7 @@
       <p id="result-set"></p>
       <p id="result-price" class="price"></p>
       <div class="add-controls">
-        <label class="foil-toggle"><input type="checkbox" id="result-foil"> Foil</label>
+        <label class="foil-toggle"><input type="checkbox" id="result-foil"> <span id="foil-label">Foil</span></label>
         <div class="qty-picker">
           <button id="qty-minus">−</button>
           <span id="qty-value">1</span>
@@ -243,7 +248,7 @@
         <a id="detail-scryfall" target="_blank" rel="noopener">View on Scryfall ↗</a>
       </div>
       <div class="detail-controls" id="detail-controls">
-        <label class="foil-toggle" title="Save applies the change"><input type="checkbox" id="detail-foil"> Foil</label>
+        <label class="foil-toggle" title="Save applies the change"><input type="checkbox" id="detail-foil"> <span id="detail-foil-label">Foil</span></label>
         <label class="cond-select" title="Card condition — prices adjust to match">
           <select id="detail-condition">
             <option value="NM">NM · Near Mint</option>

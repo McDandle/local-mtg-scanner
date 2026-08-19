@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
-"""Local card collection tracker — MTG, Pokémon TCG, or Riftbound.
+"""Local card collection tracker — MTG, Pokémon TCG, and Yu-Gi-Oh!.
 
 Zero-dependency server (Python stdlib only). Serves a web UI on the LAN so a
 phone can act as the scanner while the library stays in SQLite on this Mac.
+All supported games run simultaneously from a single server process — switch
+between them in the UI; no restart needed.
 
-Game selection + ports (all optional, defaults shown):
-    CARD_TRACKER_GAME=mtg|pokemon|riftbound     (default mtg)
+Ports (all optional, defaults shown):
     CARD_TRACKER_PORT=8484                      (plain HTTP)
     CARD_TRACKER_TLS_PORT=8485                  (HTTPS for live camera)
+    POKEMON_TCG_API_KEY=...                     (optional — raises the
+                                                 pokemontcg.io price limit)
 
   python3 server.py
 
 Extra features (all optional, stdlib-only):
   • Offline card database — each game provider downloads its own card index
-    (Scryfall bulk JSONL for MTG, paginated pokemontcg.io for Pokémon, a
-    local riftbound_cards.csv for Riftbound) and matches scans/search locally.
+    (Scryfall bulk JSONL for MTG, the Pokémon TCG GitHub bulk data for
+    Pokémon — no API rate limit — and the YGOPRODeck bulk endpoint for
+    Yu-Gi-Oh!) and matches scans/search locally.
   • Local image cache — card images are proxied through /api/img and cached,
     so the library renders offline after first view.
   • Price refreshes run in the background and stream progress over SSE.
@@ -176,6 +180,9 @@ def init_db():
         )
         # migration: 3D card flip shows the back face of double-faced cards
         cols = [r[1] for r in conn.execute("PRAGMA table_info(cards)")]
+        if "game" not in cols:
+            conn.execute(
+                "ALTER TABLE cards ADD COLUMN game TEXT NOT NULL DEFAULT 'mtg'")
         if "back_image_uri" not in cols:
             conn.execute("ALTER TABLE cards ADD COLUMN back_image_uri TEXT")
         if "oracle_text" not in cols:
@@ -191,6 +198,10 @@ def init_db():
         if "for_sale" not in cols:
             conn.execute(
                 "ALTER TABLE cards ADD COLUMN for_sale INTEGER NOT NULL DEFAULT 0")
+        wcols = [r[1] for r in conn.execute("PRAGMA table_info(wishlist)")]
+        if "game" not in wcols:
+            conn.execute(
+                "ALTER TABLE wishlist ADD COLUMN game TEXT NOT NULL DEFAULT 'mtg'")
         if deckbuilder is not None:
             deckbuilder.init_tables(conn)
 
@@ -334,6 +345,15 @@ class Provider:
     def download_index(self, out_tmp, progress):
         """Write the trimmed JSON array of every known card to out_tmp."""
         raise NotImplementedError
+
+    def fresh_prices(self, ids):
+        """Bulk-refresh prices for many card ids.
+
+        Returns {sid: (price_usd, price_usd_foil)} to short-circuit the
+        per-card API lookup (used by Pokémon, where a bulk feed is faster and
+        avoids rate limits), or None to use the default per-card path.
+        """
+        return None
 
     def image_ok(self, url):
         try:
@@ -488,6 +508,225 @@ class PokemonProvider(Provider):
     base = "https://api.pokemontcg.io/v2"
     throttle_sec = 0.05
     image_hosts = ("images.pokemontcg.io", "img.pokemontcg.io")
+    api_key = os.environ.get("POKEMON_TCG_API_KEY", "").strip()
+
+    # -- TCGplayer bulk pricing (tcgcsv.com — TCGplayer's official data feed;
+    #    no API key and no rate limit, keyed by TCGplayer product id).
+    #    Pokémon cards map to products via the set's ptcgoCode + collector
+    #    number, and the price map is cached so refreshes don't re-download.
+    tcgsv_base = "https://tcgcsv.com/tcgplayer/3"
+    PRICE_MAP_FILE = os.path.join(ROOT, "local_prices_pokemon.json")
+    PRICE_MAP_TTL = 12 * 3600
+    _price_map = None
+    _price_map_ts = 0.0
+
+    def _tcgsv_get(self, path, retries=4):
+        last = None
+        for attempt in range(retries + 1):
+            try:
+                req = urllib.request.Request(
+                    self.tcgsv_base + path, headers={
+                        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X "
+                                      "10_15_7) AppleWebKit/537.36 "
+                                      "LocalCardTracker/1.0"})
+                with urllib.request.urlopen(req, timeout=40) as r:
+                    return json.loads(r.read())
+            except Exception as e:
+                last = e
+                if attempt < retries:
+                    time.sleep(1.5 * (attempt + 1))
+        raise last
+
+    @staticmethod
+    def _pnum(n):
+        if n is None:
+            return ""
+        return _norm_num(str(n).split("/")[0])
+
+    @staticmethod
+    def _foilish(sub):
+        return "holo" in (sub or "") or "foil" in (sub or "")
+
+    def _match_group(self, sc, sig, sname, ptc, abbrev_by, gname, gsig):
+        """Best tcgcsv group for a Pokémon set. Prefers an exact ptcgoCode→
+        abbreviation match, then the SV/SWSH/...-era prefix rule, then a
+        name+overlap heuristic (skips annotated/alternate printings)."""
+        if ptc and ptc.upper() in abbrev_by:
+            return abbrev_by[ptc.upper()]
+        pref = None
+        m = re.match(r"^([a-z]+)(\d+)$", (sc or "").lower())
+        if m and m.group(1) in ("sv", "swsh", "bw", "xy", "sm", "dp",
+                                "pl", "hgss", "em", "ex", "neo", "gym",
+                                "ecard", "mc"):
+            n = m.group(2)
+            pref = m.group(1).upper() + ("0" + n if len(n) == 1 else n)
+        best = None
+        bs = 0.0
+        for gid, gn in gname.items():
+            gnl = gn.lower()
+            if any(b in gnl for b in ("shadowless", "1st edition", "1st ed",
+                                      "first edition", "unlimited",
+                                      "black legend", "cracker jack")):
+                continue
+            ov = len(sig & gsig[gid]) / max(1, len(sig | gsig[gid]))
+            nm = _similar(_norm_name(sname), _norm_name(gn))
+            if pref and _norm_name(gn).startswith(_norm_name(pref)):
+                ov = 1.0
+            score = 0.6 * ov + 0.35 * nm + (0.3 if pref and
+                    _norm_name(gn).startswith(_norm_name(pref)) else 0)
+            if score > bs:
+                bs = score
+                best = gid
+        return best if bs >= 0.6 else None
+
+    def _build_price_map(self, cards, progress=None):
+        """Download TCGplayer poke prices (tcgcsv) and return
+        {scryfall_id: [price_usd, price_usd_foil]} for the given card
+        summaries (which must carry set_code, collector_number, name,
+        scryfall_id and ideally ptcgo_code)."""
+        groups = self._tcgsv_get("/groups")
+        groups = groups.get("results") or []
+        abbrev_by = {}
+        gname = {}
+        for g in groups:
+            gid = g["groupId"]
+            gname[gid] = g.get("name") or ""
+            a = (g.get("abbreviation") or "").strip().upper()
+            if a:
+                abbrev_by.setdefault(a, gid)
+        setsig = {}
+        sptc = {}
+        sname = {}
+        for c in cards:
+            sc = (c.get("set_code") or "").lower()
+            setsig.setdefault(sc, set()).add(
+                (_norm_name(c.get("name")), self._pnum(c.get("collector_number"))))
+            if c.get("ptcgo_code"):
+                sptc.setdefault(sc, (c.get("ptcgo_code") or "").upper())
+            sname.setdefault(sc, c.get("set_name") or "")
+        group_prod = {}
+        gidlist = list(gname)
+        total = len(gidlist)
+        for i, gid in enumerate(gidlist, 1):
+            try:
+                p = self._tcgsv_get("/%s/products" % gid)
+                pr = self._tcgsv_get("/%s/prices" % gid)
+            except Exception:
+                continue
+            prmap = {x["productId"]: x for x in (pr.get("results") or [])}
+            info = {}
+            for x in (p.get("results") or []):
+                ext = {e.get("name"): e.get("value")
+                       for e in (x.get("extendedData") or [])}
+                num = ext.get("Number")
+                if not num:
+                    continue
+                pr = prmap.get(x["productId"]) or {}
+                info[x["productId"]] = {
+                    "n": _norm_name(x.get("name")), "nn": self._pnum(num),
+                    "sub": (pr.get("subTypeName") or "").lower(),
+                    "mkt": pr.get("marketPrice")}
+            group_prod[gid] = info
+            if progress and i % 40 == 0:
+                progress(cards=i)
+            time.sleep(0.15)
+        gsig = {gid: set((v["n"], v["nn"]) for v in info.values())
+                for gid, info in group_prod.items()}
+        set2group = {}
+        for sc in setsig:
+            gid = self._match_group(sc, setsig[sc], sname.get(sc, ""),
+                                    sptc.get(sc, ""), abbrev_by, gname, gsig)
+            if gid is not None:
+                set2group[sc] = gid
+        out = {}
+        for c in cards:
+            sc = (c.get("set_code") or "").lower()
+            gid = set2group.get(sc)
+            if gid is None or gid not in group_prod:
+                continue
+            nn = self._pnum(c.get("collector_number"))
+            nm = _norm_name(c.get("name"))
+            cand = [v for v in group_prod[gid].values()
+                    if v["nn"] == nn and nm in v["n"]]
+            mk = [v["mkt"] for v in cand if isinstance(v["mkt"], (int, float))]
+            nf = [v["mkt"] for v in cand
+                  if not self._foilish(v["sub"]) and isinstance(v["mkt"], (int, float))]
+            fl = [v["mkt"] for v in cand
+                  if self._foilish(v["sub"]) and isinstance(v["mkt"], (int, float))]
+            usd = max(nf) if nf else (max(mk) if mk else None)
+            fld = max(fl) if fl else (max(mk) if mk else None)
+            if usd or fld:
+                out[c["scryfall_id"]] = [usd, fld]
+        return out
+
+    def price_map(self, force=False):
+        """Cached full-card TCGplayer price map for the Pokémon offline index."""
+        now = time.time()
+        if not force and self._price_map is not None and \
+                now - self._price_map_ts < self.PRICE_MAP_TTL:
+            return self._price_map
+        if not force and os.path.exists(self.PRICE_MAP_FILE):
+            try:
+                if now - os.path.getmtime(self.PRICE_MAP_FILE) < self.PRICE_MAP_TTL:
+                    with open(self.PRICE_MAP_FILE) as f:
+                        self._price_map = json.load(f)
+                    self._price_map_ts = now
+                    return self._price_map
+            except Exception:
+                pass
+        load_local("pokemon")
+        cards = _state_for("pokemon").get("cards") or []
+        if not cards:
+            return {}
+        m = self._build_price_map(cards)
+        self._price_map = m
+        self._price_map_ts = now
+        try:
+            with open(self.PRICE_MAP_FILE, "w") as f:
+                json.dump(m, f)
+        except OSError:
+            pass
+        return m
+
+    def fresh_prices(self, ids):
+        """Pokémon prices come from the TCGplayer bulk feed (no per-card API
+        calls, no rate limits); fall back to pokemontcg.io when unavailable."""
+        m = self.price_map()
+        if not m:
+            return None
+        out = {}
+        for sid in ids:
+            p = m.get(sid)
+            if p and (p[0] or p[1]):
+                out[sid] = (p[0], p[1])
+        return out if out else None
+
+    def _req(self, path, params=None):
+        url = self.base + path
+        if params:
+            url += "?" + urllib.parse.urlencode(params)
+        headers = {"User-Agent": "LocalCardTracker/1.0 (personal collection tool)",
+                   "Accept": "application/json"}
+        if self.api_key:
+            headers["X-Api-Key"] = self.api_key
+        return urllib.request.Request(url, headers=headers)
+
+    def _get(self, path, params=None, retries=4):
+        last = None
+        for attempt in range(retries + 1):
+            self._throttle()
+            try:
+                with urllib.request.urlopen(self._req(path, params), timeout=30) as resp:
+                    return json.loads(resp.read())
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    return None
+                last = e
+            except Exception as e:
+                last = e
+            if attempt < retries:
+                time.sleep(1.0 * (attempt + 1))
+        raise last
 
     def summary(self, c):
         if "image_uri" in c and "images" not in c and "image_uris" not in c:
@@ -518,10 +757,13 @@ class PokemonProvider(Provider):
             "type_line": " ".join(x for x in (c.get("supertype"), " ".join(c.get("subtypes") or [])) if x),
             "colors": "",
             "image_uri": image,
-            "scryfall_uri": (c.get("tcgplayer") or {}).get("url") or "",
+            "scryfall_uri": (c.get("tcgplayer") or {}).get("url") or
+                ("https://www.tcgplayer.com/search/all/product?q=" +
+                 urllib.parse.quote(c.get("name") or "")),
             "price_usd": market(("normal", "reverseHolofoil", "unlimited", "1stEditionNormal", "holofoil")),
             "price_usd_foil": market(("holofoil", "reverseHolofoil", "1stEditionHolofoil", "unlimitedHolofoil")),
             "back_image_uri": None,
+            "ptcgo_code": setinfo.get("ptcgoCode") or "",
             "released_at": setinfo.get("releaseDate") or "",
         }
 
@@ -529,66 +771,132 @@ class PokemonProvider(Provider):
         # pokemontcg.io needs structured queries — turn a bare word into a
         # quoted name search, but pass through advanced syntax (set:, etc.).
         pq = q if ":" in q else 'name:"%s"' % q.replace('"', "")
-        d = self.get_json("/cards", {"q": pq, "pageSize": limit,
-                                     "orderBy": "-set.releaseDate"})
+        d = self._get("/cards", {"q": pq, "pageSize": limit,
+                                 "orderBy": "-set.releaseDate"})
         return [self.summary(c) for c in (d or {}).get("data", [])[:limit]]
 
     def search_numbered(self, head, num):
         out = []
-        d = self.get_json("/cards", {"q": 'name:"%s" number:%s' % (head, num),
-                                     "pageSize": 24, "orderBy": "-set.releaseDate"})
+        d = self._get("/cards", {"q": 'name:"%s" number:%s' % (head, num),
+                                 "pageSize": 24, "orderBy": "-set.releaseDate"})
         out += [self.summary(c) for c in (d or {}).get("data", [])]
         if not out and len(head) <= 8:
-            d = self.get_json("/cards", {"q": "set.id:%s number:%s" % (head.lower(), num),
-                                         "pageSize": 12})
+            d = self._get("/cards", {"q": "set.id:%s number:%s" % (head.lower(), num),
+                                     "pageSize": 12})
             out += [self.summary(c) for c in (d or {}).get("data", [])]
         return out[:24]
 
     def get_card(self, sid):
-        d = self.get_json("/cards/" + sid)
-        return d if d and d.get("id") else None
+        d = self._get("/cards/" + sid)
+        data = (d or {}).get("data")
+        if isinstance(data, list):
+            return data[0] if data else None
+        return data if data and data.get("id") else None
 
     def exact_lookup(self, set_code, number):
-        d = self.get_json("/cards", {"q": "set.id:%s number:%s" % (set_code.lower(), number),
-                                     "pageSize": 1})
+        d = self._get("/cards", {"q": "set.id:%s number:%s" % (set_code.lower(), number),
+                                 "pageSize": 1})
         data = (d or {}).get("data") or []
         return self.summary(data[0]) if data else None
 
     def name_lookup(self, name):
-        d = self.get_json("/cards", {"q": "name:%s" % name, "pageSize": 1,
-                                     "orderBy": "-set.releaseDate"})
+        d = self._get("/cards", {"q": "name:%s" % name, "pageSize": 1,
+                                 "orderBy": "-set.releaseDate"})
         data = (d or {}).get("data") or []
         return self.summary(data[0]) if data else None
 
     def download_index(self, out_tmp, progress):
-        count = 0
-        page = 1
-        page_size = 250
+        # Pull the whole Pokémon TCG card index from the pokemon-tcg-data
+        # GitHub repo as a single tarball — no API rate limit, one request,
+        # fully self-contained. Images come from images.pokemontcg.io and are
+        # cached through /api/img as they're viewed.
+        import tarfile
+        import shutil
+        url = ("https://codeload.github.com/PokemonTCG/"
+               "pokemon-tcg-data/tar.gz/refs/heads/master")
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "LocalCardTracker/1.0 (personal collection tool)"})
+        tmp_tar = out_tmp + ".tar.gz"
+        with urllib.request.urlopen(req, timeout=180) as resp, \
+                open(tmp_tar, "wb") as f:
+            done = 0
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+                done += len(chunk)
+                if done % (8 << 20) < (1 << 20):
+                    progress(done_mb=round(done / 1048576.0, 1))
+        extract_dir = tempfile.mkdtemp(prefix="pkmn-tcg-data-")
+        summaries = []
+        try:
+            with tarfile.open(tmp_tar, "r:gz") as tf:
+                tf.extractall(extract_dir)
+            root = os.path.join(extract_dir, os.listdir(extract_dir)[0])
+            sets = {}
+            sets_path = os.path.join(root, "sets", "en.json")
+            if os.path.exists(sets_path):
+                with open(sets_path) as f:
+                    for s in json.load(f):
+                        sets[s.get("id")] = s
+            cards_dir = os.path.join(root, "cards", "en")
+            for fname in sorted(os.listdir(cards_dir)):
+                if not fname.endswith(".json"):
+                    continue
+                set_id = fname[:-5]
+                setinfo = sets.get(set_id) or {}
+                with open(os.path.join(cards_dir, fname)) as f:
+                    cards = json.load(f)
+                for raw in cards:
+                    raw["set"] = {"id": set_id,
+                                   "name": setinfo.get("name"),
+                                   "releaseDate": setinfo.get("releaseDate") or "",
+                                   "ptcgoCode": setinfo.get("ptcgoCode") or ""}
+                    s = self.summary(raw)
+                    if not s or not s["name"]:
+                        continue
+                    summaries.append(s)
+                    if len(summaries) % 5000 == 0:
+                        try:
+                            mb = os.path.getsize(tmp_tar) / 1048576.0
+                        except OSError:
+                            mb = 0.0
+                        progress(done_mb=round(mb, 1), cards=len(summaries))
+        finally:
+            try:
+                os.unlink(tmp_tar)
+            except OSError:
+                pass
+            shutil.rmtree(extract_dir, ignore_errors=True)
+
+        # Attach TCGplayer market prices from tcgcsv.com (bulk, no rate
+        # limit) so indexed cards carry their price offline.
+        try:
+            pmap = self._build_price_map(
+                summaries, progress=lambda **k: progress(cards=len(summaries)))
+            for s in summaries:
+                p = pmap.get(s["scryfall_id"])
+                if p:
+                    s["price_usd"], s["price_usd_foil"] = p[0], p[1]
+            try:
+                with open(self.PRICE_MAP_FILE, "w") as f:
+                    json.dump(pmap, f)
+            except OSError:
+                pass
+        except Exception:
+            pass
+
         with open(out_tmp, "w") as out:
             out.write("[")
             wrote = False
-            while True:
-                d = self.get_json("/cards", {"pageSize": page_size, "page": page,
-                                             "orderBy": "set.releaseDate,number"})
-                data = (d or {}).get("data") or []
-                if not data:
-                    break
-                total = (d or {}).get("totalCount") or 0
-                for raw in data:
-                    s = _trim_local(raw)
-                    if not s:
-                        continue
-                    if wrote:
-                        out.write(",\n")
-                    out.write(json.dumps(s))
-                    wrote = True
-                    count += 1
-                progress(cards=count)
-                page += 1
-                if total and count >= total:  # authoritative end (handles short pages)
-                    break
-                if not total and len(data) < page_size:  # safety net, no totalCount
-                    break
+            count = 0
+            for s in summaries:
+                if wrote:
+                    out.write(",\n")
+                out.write(json.dumps(s))
+                wrote = True
+                count += 1
             out.write("]")
         progress(cards=count)
 
@@ -671,18 +979,180 @@ class RiftboundProvider(Provider):
         progress(cards=count)
 
 
-PROVIDERS = {p.id: p for p in (MTGProvider(), PokemonProvider(), RiftboundProvider())}
-P = PROVIDERS.get(GAME, PROVIDERS["mtg"])
+def _ygo_set_parts(full_code):
+    """Split a Yu-Gi-Oh! set code (e.g. 'FOTB-EN043', 'SDK-007', 'DB49')
+    into (set_prefix, collector_number). Degrades gracefully on the odd
+    promo codes (e.g. 'ORCS-ENSE1' → ('ORCS', 'SE1'))."""
+    full = (full_code or "").strip()
+    if not full:
+        return None, None
+    head, sep, tail = full.partition("-")
+    if sep:
+        number = tail or None
+        m2 = re.match(r"^([A-Za-z]{2})([A-Za-z0-9]+)$", tail)
+        if m2 and m2.group(2) and re.search(r"\d", m2.group(2)):
+            number = m2.group(2)  # 2-letter language + number (EN043/ENSE1)
+        else:
+            m1 = re.match(r"^([A-Za-z])(\d+)$", tail)
+            if m1:
+                number = m1.group(2)  # 1-letter language + number (E088)
+        return head.upper(), number
+    m = re.match(r"^([A-Za-z]+)(\d.*)$", full)
+    if m:
+        return m.group(1).upper(), m.group(2)
+    return full.upper(), None
+
+
+def _ygo_sid(cid, full_code, rarity):
+    """Stable, URL-safe unique id for a printing (card + set code + rarity)."""
+    slug = lambda s: re.sub(r"[^a-z0-9]", "", (s or "").lower())
+    return "%s-%s-%s" % (cid, slug(full_code), slug(rarity))
+
+
+class YugiohProvider(Provider):
+    id = "yugioh"
+    label = "Yu-Gi-Oh!"
+    base = "https://db.ygoprodeck.com/api/v7"
+    throttle_sec = 0.05
+    image_hosts = ("images.ygoprodeck.com",)
+
+    def summary(self, c):
+        # already-trimmed summary (e.g. from the local DB)
+        if "image_uri" in c and "card_sets" not in c and "card_images" not in c:
+            return {k: c.get(k) for k in SUMMARY_KEYS}
+        cid = c["id"]
+        sets = c.get("card_sets") or []
+        si = sets[0] if sets else {}
+        full_code = si.get("set_code") or ""
+        set_code, number = _ygo_set_parts(full_code)
+        image = ((c.get("card_images") or [{}])[0].get("image_url") or None)
+        price = None
+        if si.get("set_price") not in (None, ""):
+            price = si.get("set_price")
+        else:
+            prices = c.get("card_prices") or [{}]
+            price = (prices[0].get("tcgplayer_price") if prices else None)
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            price = None
+        return {
+            "scryfall_id": _ygo_sid(cid, full_code, si.get("set_rarity")),
+            "name": c["name"],
+            "set_code": set_code,
+            "set_name": si.get("set_name") or "",
+            "collector_number": number,
+            "rarity": si.get("set_rarity") or "",
+            "mana_cost": "",
+            "type_line": c.get("type") or c.get("humanReadableCardType") or "",
+            "colors": "",
+            "image_uri": image,
+            "scryfall_uri": c.get("ygoprodeck_url") or "",
+            "price_usd": price,
+            "price_usd_foil": None,
+            "back_image_uri": None,
+        }
+
+    def search(self, q, limit=24):
+        d = self.get_json("/cardinfo.php", {"fname": q})
+        return [self.summary(c) for c in (d or {}).get("data", [])[:limit]]
+
+    def search_numbered(self, head, num):
+        return []  # local index handles set+number; live fuzzy covers the rest
+
+    def get_card(self, sid):
+        cid = sid.split("-")[0] if sid else sid
+        d = self.get_json("/cardinfo.php", {"id": cid})
+        data = (d or {}).get("data") or []
+        return data[0] if data else None
+
+    def exact_lookup(self, set_code, number):
+        return None  # set+number lives in the offline index
+
+    def name_lookup(self, name):
+        d = self.get_json("/cardinfo.php", {"fname": name})
+        data = (d or {}).get("data") or []
+        return self.summary(data[0]) if data else None
+
+    def download_index(self, out_tmp, progress):
+        # YGOPRODeck's bulk endpoint returns every card + printings + prices
+        # in a single request (no pagination, effectively no rate limit).
+        url = self.base + "/cardinfo.php"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "LocalCardTracker/1.0 (personal collection tool)"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            raw = resp.read()
+        doc = json.loads(raw)
+        count = 0
+        with open(out_tmp, "w") as out:
+            out.write("[")
+            wrote = False
+            for c in (doc or {}).get("data", []):
+                for si in (c.get("card_sets") or []):
+                    # narrow to this printing for the summary
+                    one = dict(c)
+                    one["card_sets"] = [si]
+                    s = self.summary(one)
+                    if not s or not s["name"]:
+                        continue
+                    if wrote:
+                        out.write(",\n")
+                    out.write(json.dumps(s))
+                    wrote = True
+                    count += 1
+                    if count % 5000 == 0:
+                        progress(cards=count)
+            out.write("]")
+        progress(cards=count)
+
+
+PROVIDERS = {p.id: p for p in (MTGProvider(), PokemonProvider(),
+                                YugiohProvider(), RiftboundProvider())}
+GAMES = ("mtg", "pokemon", "yugioh")
+DEFAULT_GAME = GAME if GAME in PROVIDERS else "mtg"
+P = PROVIDERS["mtg"]  # MTG stays the deck-builder/assistant provider
+
+
+def provider_for(game):
+    """Resolve a game id to its provider (unknown ids fall back to MTG)."""
+    return PROVIDERS.get((game or "").strip().lower()) or PROVIDERS["mtg"]
+
+
+def image_ok_any(url):
+    return any(p.image_ok(url) for p in PROVIDERS.values())
 
 # -------------------------------------------------- offline card database
 
-_local_cards = None      # list of trimmed summaries
-_local_exact = None      # {(set_lower, norm_num): summary}
-_local_by_name = None    # {norm_name: [summary, ...]}
-_local_by_id = None      # {scryfall_id: summary}
-_local_meta = None
 _local_lock = threading.Lock()
-_download_state = {"active": False, "phase": "", "done_mb": 0.0, "total_mb": 0.0, "cards": 0}
+_local_store = {}       # game -> {cards, exact, byname, byid, meta}
+_download_state = {}    # game -> {active, phase, done_mb, total_mb, cards}
+
+
+def _local_files(game):
+    game = (game or "mtg").lower()
+    if game == "mtg":
+        return LOCAL_CARDS_FILE, LOCAL_META_FILE
+    return (os.path.join(ROOT, "local_cards_%s.json" % game),
+            os.path.join(ROOT, "localdb_meta_%s.json" % game))
+
+
+def _state_for(game):
+    game = (game or "mtg").lower()
+    st = _local_store.get(game)
+    if st is None:
+        st = {}
+        _local_store[game] = st
+    return st
+
+
+def _download_state_for(game):
+    game = (game or "mtg").lower()
+    st = _download_state.get(game)
+    if st is None:
+        st = {"active": False, "phase": "", "done_mb": 0.0,
+              "total_mb": 0.0, "cards": 0}
+        _download_state[game] = st
+    return st
 
 
 def _norm_name(s):
@@ -705,47 +1175,49 @@ def _index_cards(cards):
     return exact, byname, byid
 
 
-def load_local():
-    """Lazily parse local_cards.json into in-memory indexes (once)."""
-    global _local_cards, _local_exact, _local_by_name, _local_by_id, _local_meta
-    with _local_lock:
-        if _local_cards is not None:
-            return True
-        if not os.path.exists(LOCAL_CARDS_FILE):
-            return False
-        try:
-            with open(LOCAL_CARDS_FILE) as f:
-                cards = json.load(f)
-            _local_cards = cards
-            _local_exact, _local_by_name, _local_by_id = _index_cards(cards)
-        except Exception:
-            return False
-        try:
-            with open(LOCAL_META_FILE) as f:
-                _local_meta = json.load(f)
-        except Exception:
-            _local_meta = None
+def load_local(game="mtg"):
+    """Lazily parse a game's local index into memory (once per process)."""
+    st = _state_for(game)
+    if "cards" in st:
         return True
+    cards_file, meta_file = _local_files(game)
+    if not os.path.exists(cards_file):
+        return False
+    try:
+        with open(cards_file) as f:
+            cards = json.load(f)
+        st["cards"] = cards
+        st["exact"], st["byname"], st["byid"] = _index_cards(cards)
+    except Exception:
+        return False
+    try:
+        with open(meta_file) as f:
+            st["meta"] = json.load(f)
+    except Exception:
+        st["meta"] = None
+    return True
 
 
-def local_by_sid(sid):
-    load_local()
-    return _local_by_id.get(sid) if _local_by_id else None
+def local_by_sid(sid, game="mtg"):
+    load_local(game)
+    byid = _state_for(game).get("byid")
+    return byid.get(sid) if byid else None
 
 
-def fetch_card(sid):
+def fetch_card(sid, game="mtg"):
     """Best-effort card lookup: local DB first, live API to enrich.
 
     For double-faced cards missing their back image (older index), prefer the
     live API so adds always carry the flip side — and fall back to the local
     copy when offline.
     """
-    card = local_by_sid(sid)
+    prov = provider_for(game)
+    card = local_by_sid(sid, game)
     if card is not None and not (card.get("has_faces") and not card.get("back_image_uri")):
         return card
-    if P.has_api:
+    if prov.has_api:
         try:
-            api_card = P.get_card(sid)
+            api_card = prov.get_card(sid)
             if api_card:
                 return api_card
         except Exception:
@@ -753,44 +1225,54 @@ def fetch_card(sid):
     return card
 
 
-def local_exact_match(set_code, number):
-    load_local()
-    if not _local_exact:
+def local_exact_match(set_code, number, game="mtg"):
+    load_local(game)
+    exact = _state_for(game).get("exact")
+    if not exact:
         return None
-    got = _local_exact.get((str(set_code).lower(), _norm_num(number)))
+    got = exact.get((str(set_code).lower(), _norm_num(number)))
     return got[0] if got else None
 
 
-def local_name_match(name):
-    load_local()
-    if not _local_by_name:
+def local_name_match(name, game="mtg"):
+    load_local(game)
+    byname = _state_for(game).get("byname")
+    if not byname:
         return None
-    cands = _local_by_name.get(_norm_name(name.split("//")[0].strip()))
+    cands = byname.get(_norm_name(name.split("//")[0].strip()))
     if not cands:
         return None
     cands.sort(key=lambda c: c.get("released_at") or "", reverse=True)
     return cands[0]
 
 
-def local_numbered_names(name, number):
+def local_by_name_index(game="mtg"):
+    """The whole {norm_name: [summary, ...]} index for a game (deck builder)."""
+    load_local(game)
+    return _state_for(game).get("byname") or {}
+
+
+def local_numbered_names(name, number, game="mtg"):
     """Every printing of a name with a given collector number (local DB)."""
-    load_local()
-    if not _local_by_name:
+    load_local(game)
+    byname = _state_for(game).get("byname")
+    if not byname:
         return []
     nn = _norm_num(number)
-    got = [c for c in _local_by_name.get(_norm_name(name.split("//")[0].strip()), [])
+    got = [c for c in byname.get(_norm_name(name.split("//")[0].strip()), [])
            if _norm_num(c.get("collector_number", "")) == nn]
     got.sort(key=lambda c: c.get("released_at") or "", reverse=True)
     return got
 
 
-def local_search(q):
-    load_local()
-    if not _local_cards:
+def local_search(q, game="mtg"):
+    load_local(game)
+    cards = _state_for(game).get("cards")
+    if not cards:
         return []
     qn = _norm_name(q)
     out = []
-    for c in _local_cards:
+    for c in cards:
         if qn in _norm_name(c["name"]) or qn in _norm_name(c.get("set_name", "")):
             out.append(c)
         if len(out) >= 24:
@@ -799,25 +1281,25 @@ def local_search(q):
     return out[:24]
 
 
-def _search_numbered_local(head, num):
+def _search_numbered_local(head, num, game="mtg"):
     out, seen = [], set()
     def add(c):
         if c and c["scryfall_id"] not in seen:
             seen.add(c["scryfall_id"])
             out.append(c)
-    for c in local_numbered_names(head, num):
+    for c in local_numbered_names(head, num, game):
         add(c)
     if re.fullmatch(r"[A-Za-z0-9]{3,5}", head):
-        c = local_exact_match(head, num)
+        c = local_exact_match(head, num, game)
         if c:
             add(c)
     return out[:24]
 
 
-def _trim_local(c):
+def _trim_local(c, game="mtg"):
     """Trim a raw provider card to summary + release date + face info."""
     try:
-        s = P.summary(c)
+        s = provider_for(game).summary(c)
     except Exception:
         return None
     s["released_at"] = c.get("released_at") or s.get("released_at") or ""
@@ -840,7 +1322,7 @@ def _iter_lines(f, chunk=65536):
         yield buf
 
 
-def _write_index(lines, out_tmp, progress, decode=False):
+def _write_index(lines, out_tmp, progress, decode=False, game="mtg"):
     """Write a trimmed JSON array from text (or bytes) card lines."""
     count = 0
     wrote = False
@@ -871,12 +1353,12 @@ def _write_index(lines, out_tmp, progress, decode=False):
                     try:
                         doc = json.loads(first + rest)
                         for c in (doc if isinstance(doc, list) else []):
-                            emit(_trim_local(c))
+                            emit(_trim_local(c, game))
                     except ValueError:
                         pass
                     break
             try:
-                emit(_trim_local(json.loads(s)))
+                emit(_trim_local(json.loads(s), game))
             except ValueError:
                 continue
         out.write("]")
@@ -884,61 +1366,69 @@ def _write_index(lines, out_tmp, progress, decode=False):
     return count
 
 
-def download_localdb():
-    """Build the local card index from the game's provider (background)."""
+def download_localdb(game="mtg"):
+    """Build the local card index for one game (background)."""
+    game = (game or "mtg").lower()
+
     def work():
-        global _local_cards, _local_exact, _local_by_name, _local_by_id, _local_meta
+        prov = provider_for(game)
+        st = _state_for(game)
+        dstate = _download_state_for(game)
+        cards_file, meta_file = _local_files(game)
         with _local_lock:
-            if _download_state["active"]:
+            if dstate["active"]:
                 return
-            _download_state.update(active=True, phase="download",
-                                   done_mb=0.0, total_mb=0.0, cards=0)
-        out_tmp = LOCAL_CARDS_FILE + ".tmp"
+            dstate.update(active=True, phase="download",
+                          done_mb=0.0, total_mb=0.0, cards=0)
+        out_tmp = cards_file + ".tmp"
         def progress(done_mb=None, total_mb=None, cards=None):
             with _local_lock:
                 if done_mb is not None:
-                    _download_state["done_mb"] = done_mb
+                    dstate["done_mb"] = done_mb
                 if total_mb is not None:
-                    _download_state["total_mb"] = total_mb
+                    dstate["total_mb"] = total_mb
                 if cards is not None:
-                    _download_state["cards"] = cards
-                ev = dict(_download_state)
-            broadcast({"type": "localdb-progress", "phase": "download",
+                    dstate["cards"] = cards
+                ev = dict(dstate)
+            broadcast({"type": "localdb-progress", "game": game,
+                       "phase": "download",
                        "done_mb": round(ev.get("done_mb", 0), 1),
                        "total_mb": round(ev.get("total_mb", 0), 1),
                        "cards": ev.get("cards", 0)})
         try:
-            P.download_index(out_tmp, progress)
-            _download_state["phase"] = "build"
-            broadcast({"type": "localdb-progress", "phase": "build"})
+            prov.download_index(out_tmp, progress)
+            dstate["phase"] = "build"
+            broadcast({"type": "localdb-progress", "game": game,
+                       "phase": "build"})
             with open(out_tmp) as f:
                 cards = json.load(f)
             with _local_lock:
-                _local_cards = cards
-                _local_exact, _local_by_name, _local_by_id = _index_cards(cards)
-                _local_meta = {"downloaded_at": now_iso(),
-                               "card_count": len(cards),
-                               "source": P.id}
-            os.replace(out_tmp, LOCAL_CARDS_FILE)
-            with open(LOCAL_META_FILE, "w") as f:
-                json.dump(_local_meta, f)
-            broadcast({"type": "localdb-done", "card_count": len(cards)})
+                st["cards"] = cards
+                st["exact"], st["byname"], st["byid"] = _index_cards(cards)
+                st["meta"] = {"downloaded_at": now_iso(),
+                              "card_count": len(cards),
+                              "source": prov.id}
+            os.replace(out_tmp, cards_file)
+            with open(meta_file, "w") as f:
+                json.dump(st["meta"], f)
+            broadcast({"type": "localdb-done", "game": game,
+                       "card_count": len(cards)})
         except Exception as e:
             try:
                 os.unlink(out_tmp)
             except OSError:
                 pass
-            broadcast({"type": "localdb-error", "error": str(e)})
+            broadcast({"type": "localdb-error", "game": game, "error": str(e)})
         finally:
             with _local_lock:
-                _download_state.update(active=False, phase="", done_mb=0.0,
-                                       total_mb=0.0, cards=0)
+                dstate.update(active=False, phase="", done_mb=0.0,
+                              total_mb=0.0, cards=0)
     threading.Thread(target=work, daemon=True).start()
 
 
-def local_meta():
+def local_meta(game="mtg"):
     try:
-        with open(LOCAL_META_FILE) as f:
+        with open(_local_files(game)[1]) as f:
             return json.load(f)
     except Exception:
         return None
@@ -949,7 +1439,7 @@ def local_meta():
 # offline after the first view. Each provider allows its own image hosts.
 
 def api_img(self, url):
-    if not P.image_ok(url):
+    if not image_ok_any(url):
         self.send_json({"error": "not allowed"}, 403)
         return
     try:
@@ -1135,13 +1625,22 @@ def candidate_names(lines):
 # "TLE • EN • …" (set code + language), or Pokémon-style "189/165".
 NUM_RE = re.compile(r"^[CURMTS]?\s*0*(\d{1,4})(?:\s*/\s*\d+)?[a-z★]?$")
 SET_RE = re.compile(r"^([A-Z0-9]{3,5})\s*[•·.\-*+]\s*[A-Z]{2}\b")
+# Yu-Gi-Oh! set codes like "FOTB-EN043", "SDK-007", "LON-E088".
+YGO_CODE_RE = re.compile(
+    r"^([A-Za-z0-9]{2,6})[-\s–—.]*([A-Za-z]{0,3})?[-\s–—.]*0*(\d{1,4})$")
 
 
-def parse_print_info(lines):
+def parse_print_info(lines, game="mtg"):
     """Extract (set_code, collector_number) from the card's bottom edge."""
     number = set_code = None
     for ln in sorted(lines, key=lambda l: l["y"])[:8]:
         text = ln["text"].strip()
+        if game == "yugioh":
+            m = YGO_CODE_RE.match(text)
+            if m and number is None:
+                set_code = m.group(1).upper()
+                number = m.group(3)
+                continue
         m = NUM_RE.match(text)
         if m and number is None:
             number = m.group(1)
@@ -1165,19 +1664,20 @@ def _similar(a, b):
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 
-def identify_card(image_path):
+def identify_card(image_path, game="mtg"):
     """Match an OCR'd card: local DB first (fast/offline), then the API."""
+    prov = provider_for(game)
     lines = ocr_image(image_path)
     names = candidate_names(lines)
-    set_code, number = parse_print_info(lines)
+    set_code, number = parse_print_info(lines, game)
 
     # 1) Exact printing first: set code + collector number is unambiguous.
     if set_code and number:
-        card = local_exact_match(set_code, number)
+        card = local_exact_match(set_code, number, game)
         method, source = "local-exact", "local"
-        if card is None and P.has_api:
+        if card is None and prov.has_api:
             try:
-                card = P.exact_lookup(set_code, number)
+                card = prov.exact_lookup(set_code, number)
             except Exception:
                 card = None
             if card:
@@ -1192,14 +1692,14 @@ def identify_card(image_path):
     #     match name + number across printings. Still an exact printing.
     if number and names and not set_code:
         for name in names[:2]:
-            got = local_numbered_names(name, number)
+            got = local_numbered_names(name, number, game)
             if got and (len(got) == 1 or names_agree(names[0], got[0]["name"])):
                 return {"match": got[0], "method": "local-number", "source": "local",
                         "exact": True,
                         "ocr_guess": name, "ocr_candidates": names}
-            if P.has_api:
+            if prov.has_api:
                 try:
-                    got = P.search_numbered(name, number)
+                    got = prov.search_numbered(name, number)
                 except Exception:
                     got = None
                 if got and (len(got) == 1 or names_agree(names[0], got[0]["name"])):
@@ -1209,14 +1709,14 @@ def identify_card(image_path):
 
     # 3) Fall back to fuzzy name match (NOT an exact printing).
     for name in names[:4]:
-        card = local_name_match(name)
+        card = local_name_match(name, game)
         if card:
             return {"match": card, "method": "local-name", "source": "local",
                     "exact": False,
                     "ocr_guess": name, "ocr_candidates": names}
-        if P.has_api:
+        if prov.has_api:
             try:
-                card = P.name_lookup(name)
+                card = prov.name_lookup(name)
             except Exception:
                 card = None
             if card:
@@ -1255,29 +1755,44 @@ def _mark_refreshed():
     _meta_set("last_auto_refresh", str(time.time()))
 
 
-def _refresh_cards(ids, ts):
+def _refresh_cards(ids, ts, game):
+    prov = provider_for(game)
+    bulk = None
+    try:
+        bulk = prov.fresh_prices(ids)
+    except Exception:
+        bulk = None
+    use_bulk = bulk is not None
     total = len(ids)
     updated = 0
     for i, sid in enumerate(ids, 1):
-        try:
-            card = P.get_card(sid)
-        except Exception:
-            card = None
-        if card:
-            s = P.summary(card)
-            with db_lock, db() as conn:
-                conn.execute(
-                    "UPDATE cards SET price_usd=?, price_usd_foil=?, "
-                    "price_updated_at=?, back_image_uri=? WHERE scryfall_id=?",
-                    (s["price_usd"], s["price_usd_foil"], ts,
-                     s.get("back_image_uri"), sid))
-                conn.execute(
-                    "INSERT INTO price_history (scryfall_id, recorded_at, "
-                    "usd, usd_foil) VALUES (?,?,?,?)",
-                    (sid, ts, s["price_usd"], s["price_usd_foil"]))
+        usd = fld = None
+        if use_bulk:
+            pv = bulk.get(sid)
+            if not pv:
+                continue
+            usd, fld = pv[0], pv[1]
+        else:
+            try:
+                card = prov.get_card(sid)
+            except Exception:
+                card = None
+            if not card:
+                continue
+            s = prov.summary(card)
+            usd, fld = s["price_usd"], s["price_usd_foil"]
+        with db_lock, db() as conn:
+            conn.execute(
+                "UPDATE cards SET price_usd=?, price_usd_foil=?, "
+                "price_updated_at=? WHERE scryfall_id=?",
+                (usd, fld, ts, sid))
+            conn.execute(
+                "INSERT INTO price_history (scryfall_id, recorded_at, "
+                "usd, usd_foil) VALUES (?,?,?,?)",
+                (sid, ts, usd, fld))
             updated += 1
         if i % 10 == 0 or i == total:
-            broadcast({"type": "price-progress", "done": i,
+            broadcast({"type": "price-progress", "game": game, "done": i,
                        "total": total, "updated": updated})
     return updated
 
@@ -1285,12 +1800,13 @@ def _refresh_cards(ids, ts):
 def _refresh_wishlist(rows, ts):
     alerts = []
     for i, r in enumerate(rows, 1):
+        prov = provider_for(r.get("game"))
         try:
-            card = P.get_card(r["scryfall_id"])
+            card = prov.get_card(r["scryfall_id"])
         except Exception:
             card = None
         if card:
-            s = P.summary(card)
+            s = prov.summary(card)
             price = s.get("price_usd_foil") if r.get("foil") else s.get("price_usd")
             with db_lock, db() as conn:
                 conn.execute(
@@ -1312,15 +1828,17 @@ def _refresh_wishlist(rows, ts):
     return alerts
 
 
-def run_price_refresh():
-    """Refresh all collection card prices in the background."""
+def run_price_refresh(game="mtg"):
+    """Refresh one game's collection card prices in the background."""
+    game = (game or "mtg").lower()
+    prov = provider_for(game)
     with _refresh_lock:
         if _refresh_state["active"]:
             return {"error": "refresh already running"}
         with db_lock, db() as conn:
             ids = [r["scryfall_id"] for r in conn.execute(
-                "SELECT DISTINCT scryfall_id FROM cards")]
-        if not ids or not P.has_api:
+                "SELECT DISTINCT scryfall_id FROM cards WHERE game=?", (game,))]
+        if not ids or not prov.has_api:
             return {"started": False, "total": len(ids)}
         _refresh_state["active"] = True
     _mark_refreshed()
@@ -1328,8 +1846,8 @@ def run_price_refresh():
     def work():
         try:
             backup_db()
-            updated = _refresh_cards(ids, now_iso())
-            broadcast({"type": "price-done", "updated": updated})
+            updated = _refresh_cards(ids, now_iso(), game)
+            broadcast({"type": "price-done", "game": game, "updated": updated})
             broadcast({"type": "library-changed"})
         finally:
             with _refresh_lock:
@@ -1339,13 +1857,18 @@ def run_price_refresh():
     return {"started": True, "total": len(ids)}
 
 
-def run_wishlist_refresh():
+def run_wishlist_refresh(game=None):
     """Refresh wishlist prices in the background; alerts broadcast over SSE."""
+    game = (game or "").lower() or None
     with _refresh_lock:
         if _refresh_state["active"]:
             return {"error": "refresh already running"}
         with db_lock, db() as conn:
-            rows = [dict(r) for r in conn.execute("SELECT * FROM wishlist")]
+            if game:
+                rows = [dict(r) for r in conn.execute(
+                    "SELECT * FROM wishlist WHERE game=?", (game,))]
+            else:
+                rows = [dict(r) for r in conn.execute("SELECT * FROM wishlist")]
         if not rows:
             return {"started": False}
         _refresh_state["active"] = True
@@ -1363,22 +1886,26 @@ def run_wishlist_refresh():
 
 
 def run_daily_refresh():
-    """One-shot refresh of collection + wishlist prices (auto-refresh path)."""
+    """One-shot refresh of every game's collection + wishlist prices."""
     with _refresh_lock:
         if _refresh_state["active"]:
             return
-        with db_lock, db() as conn:
-            ids = [r["scryfall_id"] for r in conn.execute(
-                "SELECT DISTINCT scryfall_id FROM cards")]
-            rows = [dict(r) for r in conn.execute("SELECT * FROM wishlist")]
         _refresh_state["active"] = True
 
     def work():
         try:
             ts = now_iso()
-            if ids and P.has_api:
-                updated = _refresh_cards(ids, ts)
-                broadcast({"type": "price-done", "updated": updated})
+            for g in GAMES:
+                prov = provider_for(g)
+                with db_lock, db() as conn:
+                    ids = [r["scryfall_id"] for r in conn.execute(
+                        "SELECT DISTINCT scryfall_id FROM cards WHERE game=?", (g,))]
+                if ids and prov.has_api:
+                    updated = _refresh_cards(ids, ts, g)
+                    broadcast({"type": "price-done", "game": g,
+                               "updated": updated})
+            with db_lock, db() as conn:
+                rows = [dict(r) for r in conn.execute("SELECT * FROM wishlist")]
             alerts = _refresh_wishlist(rows, ts) if rows else []
             broadcast({"type": "wishlist-done", "alerts": alerts})
             broadcast({"type": "library-changed"})
@@ -1434,6 +1961,11 @@ class Handler(BaseHTTPRequestHandler):
             raise BodyTooLarge(max_bytes)
         return self.rfile.read(length) if length else b""
 
+    def game_param(self):
+        """The game a request targets (from ?game=, defaulting to MTG)."""
+        q = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(self.path).query))
+        return (q.get("game") or "").strip().lower() or DEFAULT_GAME
+
     def send_file(self, relpath, ctype):
         path = os.path.join(STATIC_DIR, relpath)
         if not os.path.isfile(path):
@@ -1470,6 +2002,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_file("style.css", "text/css")
             elif path == "/cardback.jpg":
                 self.send_file("cardback.jpg", "image/jpeg")
+            elif path == "/pokemon-back.jpg":
+                self.send_file("pokemon-back.jpg", "image/jpeg")
+            elif path == "/yugioh-back.jpg":
+                self.send_file("yugioh-back.jpg", "image/jpeg")
             elif path == "/insights.html":
                 self.send_file("insights.html", "text/html; charset=utf-8")
             elif path == "/insights.js":
@@ -1479,19 +2015,19 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/chat.js":
                 self.send_file("chat.js", "application/javascript")
             elif path == "/api/insights":
-                self.api_insights()
+                self.api_insights(query.get("game"))
             elif path == "/api/wishlist":
-                self.api_wishlist()
+                self.api_wishlist(query.get("game"))
             elif path == "/api/wishlist/alerts":
-                self.api_wishlist_alerts()
+                self.api_wishlist_alerts(query.get("game"))
             elif path == "/api/collection":
-                self.api_collection()
+                self.api_collection(query.get("game"))
             elif path == "/api/search":
-                self.api_search(query.get("q", ""))
+                self.api_search(query.get("q", ""), query.get("game"))
             elif path.startswith("/api/history/"):
-                self.api_history(path.split("/")[-1])
+                self.api_history(path.split("/")[-1], query.get("game"))
             elif path.startswith("/api/card/"):
-                self.api_card(path.split("/")[-1])
+                self.api_card(path.split("/")[-1], query.get("game"))
             elif path == "/api/events":
                 self.api_events()
             elif path == "/api/qr":
@@ -1499,9 +2035,9 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/info":
                 self.api_info()
             elif path == "/api/export":
-                self.api_export()
+                self.api_export(query.get("game"))
             elif path == "/api/localdb":
-                self.api_localdb()
+                self.api_localdb(query.get("game"))
             elif path == "/api/img":
                 api_img(self, query.get("u", ""))
             elif deckbuilder is not None and deckbuilder.handle_get(self, path, query):
@@ -1558,7 +2094,9 @@ class Handler(BaseHTTPRequestHandler):
                         "qr_available": segno is not None,
                         "https": TLS_AVAILABLE,
                         "ocr_backend": detect_ocr_backend(),
-                        "game": P.id,
+                        "game": DEFAULT_GAME,
+                        "games": [{"id": g, "label": PROVIDERS[g].label}
+                                  for g in GAMES],
                         "assistant": assistant is not None and assistant.available()})
 
     def api_chat(self):
@@ -1617,10 +2155,16 @@ class Handler(BaseHTTPRequestHandler):
                     _subscribers.remove(q)
 
     # -- api implementations
-    def api_collection(self):
+    def api_collection(self, game=None):
+        game = (game or "").strip().lower()
         with db_lock, db() as conn:
-            rows = [dict(r) for r in conn.execute(
-                "SELECT * FROM cards ORDER BY name COLLATE NOCASE")]
+            if game in GAMES:
+                rows = [dict(r) for r in conn.execute(
+                    "SELECT * FROM cards WHERE game=? ORDER BY name COLLATE NOCASE",
+                    (game,))]
+            else:
+                rows = [dict(r) for r in conn.execute(
+                    "SELECT * FROM cards ORDER BY name COLLATE NOCASE")]
         total = 0.0
         count = 0
         for r in rows:
@@ -1635,7 +2179,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"cards": rows, "total_value": round(total, 2),
                         "total_cards": count})
 
-    def api_search(self, q):
+    def api_search(self, q, game=None):
+        game = (game or "").strip().lower() or DEFAULT_GAME
+        prov = provider_for(game)
         q = q.strip()
         if not q:
             self.send_json({"cards": []})
@@ -1643,26 +2189,26 @@ class Handler(BaseHTTPRequestHandler):
         m = NUM_Q_RE.match(q)
         if m and m.group(2):
             head, num = m.group(1).strip(), m.group(2)
-            cards = _search_numbered_local(head, num)
-            if not cards and P.has_api:
+            cards = _search_numbered_local(head, num, game)
+            if not cards and prov.has_api:
                 try:
-                    cards = P.search_numbered(head, num)
+                    cards = prov.search_numbered(head, num)
                 except Exception:
                     cards = []
             if cards:
                 self.send_json({"cards": cards})
                 return
-        cards = None
-        if P.has_api:
+        # local-first search — the offline index needs no API at all
+        cards = local_search(q, game)
+        if not cards and prov.has_api:
             try:
-                cards = P.search(q)
+                cards = prov.search(q)
             except Exception:
                 cards = None
-        if not cards:
-            cards = local_search(q)  # offline / no-API fallback
-        self.send_json({"cards": cards})
+        self.send_json({"cards": cards or []})
 
     def api_scan(self):
+        game = self.game_param()
         data = self.read_body(MAX_UPLOAD)
         if not data:
             self.send_json({"error": "empty upload"}, 400)
@@ -1677,7 +2223,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             with os.fdopen(fd, "wb") as f:
                 f.write(data)
-            result = identify_card(tmp)
+            result = identify_card(tmp, game)
         finally:
             os.unlink(tmp)
         if result.get("match"):
@@ -1685,13 +2231,14 @@ class Handler(BaseHTTPRequestHandler):
             now = time.time()
             with _last_scan_lock:
                 if _last_scan[0] != sid or now - _last_scan[1] > 8:
-                    broadcast({"type": "scan", "card": result["match"],
+                    broadcast({"type": "scan", "game": game, "card": result["match"],
                                "method": result.get("method"),
                                "source": result.get("source")})
                 _last_scan[0], _last_scan[1] = sid, now
         self.send_json(result)
 
     def api_add(self):
+        game = self.game_param()
         body = json.loads(self.read_body())
         foil = 1 if body.get("foil") else 0
         qty = max(1, int(body.get("quantity", 1)))
@@ -1708,17 +2255,17 @@ class Handler(BaseHTTPRequestHandler):
             sid = s["scryfall_id"]
         else:
             sid = body["scryfall_id"]
-            card = fetch_card(sid)
+            card = fetch_card(sid, game)
             if card is None:
                 self.send_json({"error": "card not found"}, 404)
                 return
-            s = P.summary(card)
+            s = provider_for(game).summary(card)
         ts = now_iso()
         wl_match = None
         with db_lock, db() as conn:
             existing = conn.execute(
-                "SELECT id, quantity FROM cards WHERE scryfall_id=? AND foil=?",
-                (sid, foil)).fetchone()
+                "SELECT id, quantity FROM cards WHERE scryfall_id=? AND foil=? AND game=?",
+                (sid, foil, game)).fetchone()
             if existing:
                 conn.execute("UPDATE cards SET quantity=?, price_usd=?, "
                              "price_usd_foil=?, price_updated_at=?, back_image_uri=? "
@@ -1732,23 +2279,23 @@ class Handler(BaseHTTPRequestHandler):
                        collector_number, rarity, mana_cost, type_line, colors,
                        image_uri, scryfall_uri, back_image_uri, foil, quantity,
                        price_usd, price_usd_foil, price_updated_at, added_at,
-                       condition)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       condition, game)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (sid, s["name"], s["set_code"], s["set_name"],
                      s["collector_number"], s["rarity"], s["mana_cost"],
                      s["type_line"], s["colors"], s["image_uri"],
                      s["scryfall_uri"], s.get("back_image_uri"), foil, qty,
-                     s["price_usd"], s["price_usd_foil"], ts, ts, cond))
+                     s["price_usd"], s["price_usd_foil"], ts, ts, cond, game))
             conn.execute(
                 "INSERT INTO price_history (scryfall_id, recorded_at, usd, usd_foil) "
                 "VALUES (?,?,?,?)", (sid, ts, s["price_usd"], s["price_usd_foil"]))
             wl = conn.execute(
-                "SELECT id, name, quantity FROM wishlist WHERE scryfall_id=?",
-                (sid,)).fetchone()
+                "SELECT id, name, quantity FROM wishlist WHERE scryfall_id=? AND game=?",
+                (sid, game)).fetchone()
             if wl:
                 wl_match = {"id": wl["id"], "name": wl["name"],
                             "qty": wl["quantity"]}
-        broadcast({"type": "add", "name": s["name"], "quantity": qty,
+        broadcast({"type": "add", "game": game, "name": s["name"], "quantity": qty,
                    "foil": bool(foil), "image_uri": s["image_uri"],
                    "unit_price": s["price_usd_foil"] if foil else s["price_usd"]})
         resp = {"ok": True, "name": s["name"]}
@@ -1758,6 +2305,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_update(self):
         """Quantity, foil flag, printing replacement, or delete."""
+        game = self.game_param()
         body = json.loads(self.read_body())
         card_id = int(body["id"])
         if body.get("delete"):
@@ -1775,11 +2323,11 @@ class Handler(BaseHTTPRequestHandler):
             s = {k: card.get(k) for k in SUMMARY_KEYS}
             new_sid = s["scryfall_id"]
         elif new_sid:
-            card = fetch_card(new_sid)
+            card = fetch_card(new_sid, game)
             if card is None:
                 self.send_json({"error": "printing not found"}, 404)
                 return
-            s = P.summary(card)
+            s = provider_for(game).summary(card)
             new_sid = s["scryfall_id"]
 
         with db_lock, db() as conn:
@@ -1792,8 +2340,8 @@ class Handler(BaseHTTPRequestHandler):
             merged = False
             if target_sid != row["scryfall_id"] or target_foil != row["foil"]:
                 clash = conn.execute(
-                    "SELECT id FROM cards WHERE scryfall_id=? AND foil=? AND id<>?",
-                    (target_sid, target_foil, card_id)).fetchone()
+                    "SELECT id FROM cards WHERE scryfall_id=? AND foil=? AND game=? AND id<>?",
+                    (target_sid, target_foil, row["game"], card_id)).fetchone()
                 if clash:
                     conn.execute("UPDATE cards SET quantity=quantity+? WHERE id=?",
                                  (row["quantity"], clash["id"]))
@@ -1846,14 +2394,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_refresh_prices(self):
         """Start a background refresh; progress streams over SSE."""
-        res = run_price_refresh()
+        res = run_price_refresh(self.game_param())
         if "error" in res:
             self.send_json(res, 409)
             return
         self.send_json({"ok": True, "started": res["started"],
                         "total": res.get("total", 0)})
 
-    def api_history(self, sid):
+    def api_history(self, sid, game=None):
         with db_lock, db() as conn:
             rows = [dict(r) for r in conn.execute(
                 "SELECT recorded_at, usd, usd_foil FROM price_history "
@@ -1863,7 +2411,9 @@ class Handler(BaseHTTPRequestHandler):
     # -- card details (oracle text + rulings)
     _rulings_cache = {}
 
-    def api_card(self, sid):
+    def api_card(self, sid, game=None):
+        game = (game or "").strip().lower() or DEFAULT_GAME
+        prov = provider_for(game)
         text = None
         with db_lock, db() as conn:
             row = conn.execute(
@@ -1871,9 +2421,9 @@ class Handler(BaseHTTPRequestHandler):
                 (sid,)).fetchone()
             if row:
                 text = row["oracle_text"]
-        if not text and P.has_api:
+        if not text and prov.has_api:
             try:
-                raw = P.get_card(sid)
+                raw = prov.get_card(sid)
             except Exception:
                 raw = None
             if raw:
@@ -1883,7 +2433,7 @@ class Handler(BaseHTTPRequestHandler):
                         conn.execute(
                             "UPDATE cards SET oracle_text=? WHERE scryfall_id=?",
                             (text, sid))
-        rulings = self.fetch_rulings(sid) if P.id == "mtg" else []
+        rulings = self.fetch_rulings(sid) if game == "mtg" else []
         self.send_json({"oracle_text": text or "", "rulings": rulings})
 
     def fetch_rulings(self, sid):
@@ -1938,10 +2488,16 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"ok": True, "count": len(ids)})
 
     # -- wishlist
-    def api_wishlist(self):
+    def api_wishlist(self, game=None):
+        game = (game or "").strip().lower()
         with db_lock, db() as conn:
-            rows = [dict(r) for r in conn.execute(
-                "SELECT * FROM wishlist ORDER BY added_at DESC")]
+            if game in GAMES:
+                rows = [dict(r) for r in conn.execute(
+                    "SELECT * FROM wishlist WHERE game=? ORDER BY added_at DESC",
+                    (game,))]
+            else:
+                rows = [dict(r) for r in conn.execute(
+                    "SELECT * FROM wishlist ORDER BY added_at DESC")]
         alerts = 0
         for r in rows:
             price = r["price_usd_foil"] if r.get("foil") else r["price_usd"]
@@ -1952,6 +2508,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"items": rows, "alert_count": alerts})
 
     def api_wishlist_add(self):
+        game = self.game_param()
         body = json.loads(self.read_body())
         card = body.get("card")
         if not (isinstance(card, dict) and card.get("scryfall_id") and card.get("name")):
@@ -1967,8 +2524,8 @@ class Handler(BaseHTTPRequestHandler):
             qty = 1
         with db_lock, db() as conn:
             existing = conn.execute(
-                "SELECT id FROM wishlist WHERE scryfall_id=?",
-                (card["scryfall_id"],)).fetchone()
+                "SELECT id FROM wishlist WHERE scryfall_id=? AND game=?",
+                (card["scryfall_id"], game)).fetchone()
             if existing:
                 conn.execute(
                     "UPDATE wishlist SET quantity=?, target_price=?, price_usd=?, "
@@ -1979,12 +2536,12 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute(
                     "INSERT INTO wishlist (scryfall_id, name, set_code, set_name, "
                     "collector_number, rarity, image_uri, price_usd, price_usd_foil, "
-                    "target_price, quantity, added_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "target_price, quantity, added_at, game) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (card["scryfall_id"], card["name"], card.get("set_code"),
                      card.get("set_name"), card.get("collector_number"),
                      card.get("rarity"), card.get("image_uri"),
                      card.get("price_usd"), card.get("price_usd_foil"),
-                     target, qty, now_iso()))
+                     target, qty, now_iso(), game))
         broadcast({"type": "wishlist-changed"})
         self.send_json({"ok": True})
 
@@ -2031,6 +2588,7 @@ class Handler(BaseHTTPRequestHandler):
             if row is None:
                 self.send_json({"error": "not found"}, 404)
                 return
+            game = row["game"]
             if "qty" in body:
                 try:
                     qty = max(1, int(body.get("qty") or 0))
@@ -2040,11 +2598,11 @@ class Handler(BaseHTTPRequestHandler):
                 qty = row["quantity"]
             qty = min(qty, row["quantity"])
             if to_collection:
-                card = fetch_card(row["scryfall_id"])
+                card = fetch_card(row["scryfall_id"], game)
                 s = None
                 if isinstance(card, dict):
                     try:
-                        s = P.summary(card)
+                        s = provider_for(game).summary(card)
                     except Exception:
                         s = None
                 if not s or not s.get("name"):
@@ -2060,8 +2618,8 @@ class Handler(BaseHTTPRequestHandler):
                          "back_image_uri": None}
                 ts = now_iso()
                 existing = conn.execute(
-                    "SELECT id, quantity FROM cards WHERE scryfall_id=? AND foil=?",
-                    (row["scryfall_id"], 0)).fetchone()
+                    "SELECT id, quantity FROM cards WHERE scryfall_id=? AND foil=? AND game=?",
+                    (row["scryfall_id"], 0, game)).fetchone()
                 if existing:
                     conn.execute("UPDATE cards SET quantity=?, price_usd=?, "
                                  "price_usd_foil=?, price_updated_at=?, back_image_uri=? "
@@ -2074,14 +2632,14 @@ class Handler(BaseHTTPRequestHandler):
                         """INSERT INTO cards (scryfall_id, name, set_code, set_name,
                            collector_number, rarity, mana_cost, type_line, colors,
                            image_uri, scryfall_uri, back_image_uri, foil, quantity,
-                           price_usd, price_usd_foil, price_updated_at, added_at)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                           price_usd, price_usd_foil, price_updated_at, added_at, game)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (row["scryfall_id"], s["name"], s["set_code"],
                          s["set_name"], s["collector_number"], s["rarity"],
                          s["mana_cost"], s["type_line"], s["colors"],
                          s["image_uri"], s["scryfall_uri"],
                          s.get("back_image_uri"), 0, qty, s["price_usd"],
-                         s["price_usd_foil"], ts, ts))
+                         s["price_usd_foil"], ts, ts, game))
                 conn.execute(
                     "INSERT INTO price_history (scryfall_id, recorded_at, usd, usd_foil) "
                     "VALUES (?,?,?,?)", (row["scryfall_id"], ts, s["price_usd"],
@@ -2102,15 +2660,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_wishlist_refresh(self):
         """Background refresh of wishlist prices; alerts broadcast over SSE."""
-        res = run_wishlist_refresh()
+        res = run_wishlist_refresh(self.game_param())
         if "error" in res:
             self.send_json(res, 409)
             return
         self.send_json({"ok": True, "started": res["started"]})
 
-    def api_wishlist_alerts(self):
+    def api_wishlist_alerts(self, game=None):
+        game = (game or "").strip().lower()
         with db_lock, db() as conn:
-            rows = [dict(r) for r in conn.execute("SELECT * FROM wishlist")]
+            if game in GAMES:
+                rows = [dict(r) for r in conn.execute(
+                    "SELECT * FROM wishlist WHERE game=?", (game,))]
+            else:
+                rows = [dict(r) for r in conn.execute("SELECT * FROM wishlist")]
         count = 0
         for r in rows:
             price = r["price_usd_foil"] if r.get("foil") else r["price_usd"]
@@ -2120,19 +2683,28 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"count": count})
 
     # collection insights
-    def api_insights(self):
+    def api_insights(self, game=None):
         from collections import defaultdict
+        game = (game or "").strip().lower()
 
         def card_value(c):
             p = c.get("price_usd_foil") if c["foil"] else c.get("price_usd")
             return (p or 0) * c["quantity"] * cond_mult(c.get("condition"))
 
         with db_lock, db() as conn:
-            cards = [dict(r) for r in conn.execute("SELECT * FROM cards")]
+            if game in GAMES:
+                cards = [dict(r) for r in conn.execute(
+                    "SELECT * FROM cards WHERE game=?", (game,))]
+            else:
+                cards = [dict(r) for r in conn.execute("SELECT * FROM cards")]
             hist = [dict(r) for r in conn.execute(
                 "SELECT recorded_at, scryfall_id, usd, usd_foil FROM price_history")]
             try:
-                wl_count = conn.execute("SELECT COUNT(*) FROM wishlist").fetchone()[0]
+                if game in GAMES:
+                    wl_count = conn.execute(
+                        "SELECT COUNT(*) FROM wishlist WHERE game=?", (game,)).fetchone()[0]
+                else:
+                    wl_count = conn.execute("SELECT COUNT(*) FROM wishlist").fetchone()[0]
             except Exception:
                 wl_count = 0
         # value over time: forward-fill each card's price so every date
@@ -2189,10 +2761,11 @@ class Handler(BaseHTTPRequestHandler):
 
         # set completion vs offline index (when available)
         set_progress = []
-        load_local()
-        if _local_cards:
+        load_local(game)
+        local_cards = _state_for(game).get("cards")
+        if local_cards:
             set_totals = defaultdict(set)
-            for c in _local_cards:
+            for c in local_cards:
                 set_totals[(c.get("set_code") or "").lower()].add(
                     str(c.get("collector_number") or ""))
             owned = defaultdict(set)
@@ -2226,6 +2799,54 @@ class Handler(BaseHTTPRequestHandler):
                 commanders = [{"name": r["name"], "qty": r["q"]} for r in rows]
             except Exception:
                 commanders = []
+
+        # deck win/loss records + head-to-head matchups (deck extension present)
+        matchups = {"records": [], "matchups_by": []}
+        if deckbuilder is not None:
+            try:
+                with db_lock, db() as conn:
+                    decks = [dict(r) for r in conn.execute(
+                        "SELECT id, name FROM decks")]
+                    matches = [dict(r) for r in conn.execute(
+                        "SELECT deck_id, result, opponent FROM deck_matches")]
+                rec = {d["id"]: {"name": d["name"], "wins": 0, "losses": 0}
+                       for d in decks}
+                opp = {}
+                for m in matches:
+                    r = rec.get(m["deck_id"])
+                    if r is not None:
+                        if m["result"] == "win":
+                            r["wins"] += 1
+                        else:
+                            r["losses"] += 1
+                    if m.get("opponent"):
+                        k = m["opponent"].strip().lower()
+                        a = opp.get(k)
+                        if a is None:
+                            a = {"commander": m["opponent"].strip(),
+                                 "wins": 0, "losses": 0}
+                            opp[k] = a
+                        if m["result"] == "win":
+                            a["wins"] += 1
+                        else:
+                            a["losses"] += 1
+                records = []
+                for r in rec.values():
+                    total = r["wins"] + r["losses"]
+                    r["winrate"] = round(r["wins"] / total * 100) if total else None
+                    records.append(r)
+                records.sort(key=lambda r: -(r["wins"] + r["losses"]))
+                matchup_list = sorted(opp.values(),
+                                      key=lambda a: -(a["wins"] + a["losses"]))
+                for a in matchup_list:
+                    total_a = a["wins"] + a["losses"]
+                    a["winrate"] = round(a["wins"] / total_a * 100) if total_a else None
+                matchups = {
+                    "records": records,
+                    "matchups_by": matchup_list[:10],
+                }
+            except Exception:
+                matchups = {"records": [], "matchups_by": []}
 
         # cost basis, trade/sale value, and price movers
         total_paid = 0.0
@@ -2293,17 +2914,24 @@ class Handler(BaseHTTPRequestHandler):
                           for k, v in sorted(sets.items(), key=lambda x: -x[1]["value"])[:10]],
             "top_cards": top_cards, "recent": recent,
             "set_progress": set_progress, "commanders": commanders,
+            "matchups": matchups,
         })
 
     # -- export / import
-    def api_export(self):
+    def api_export(self, game=None):
+        game = (game or "").strip().lower()
         with db_lock, db() as conn:
-            rows = [dict(r) for r in conn.execute(
-                "SELECT * FROM cards ORDER BY name COLLATE NOCASE")]
+            if game in GAMES:
+                rows = [dict(r) for r in conn.execute(
+                    "SELECT * FROM cards WHERE game=? ORDER BY name COLLATE NOCASE",
+                    (game,))]
+            else:
+                rows = [dict(r) for r in conn.execute(
+                    "SELECT * FROM cards ORDER BY name COLLATE NOCASE")]
         fields = ["scryfall_id", "name", "set_code", "set_name",
                   "collector_number", "rarity", "foil", "quantity",
                   "condition", "purchase_price", "for_trade", "for_sale",
-                  "price_usd", "price_usd_foil", "added_at"]
+                  "price_usd", "price_usd_foil", "added_at", "game"]
         buf = io.StringIO()
         w = csv.DictWriter(buf, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
@@ -2323,6 +2951,8 @@ class Handler(BaseHTTPRequestHandler):
         """CSV import (header: scryfall_id, name, set_code, collector_number,
         foil, quantity; a plain list of card names also works).
         """
+        game = self.game_param()
+        prov = provider_for(game)
         data = self.read_body(MAX_UPLOAD)
         text = data.decode("utf-8-sig", "replace")
         rows = list(csv.DictReader(io.StringIO(text)))
@@ -2335,16 +2965,16 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         summary_map = {}
-        if P.can_batch:
+        if prov.can_batch:
             sids = [r.get("scryfall_id", "").strip() for r in rows
                     if r.get("scryfall_id", "").strip()]
             for i in range(0, len(sids), 75):
                 chunk = sids[i:i + 75]
                 try:
-                    res = P.post_json("/cards/collection",
-                                      {"identifiers": [{"id": s} for s in chunk]})
+                    res = prov.post_json("/cards/collection",
+                                         {"identifiers": [{"id": s} for s in chunk]})
                     for c in (res or {}).get("data", []):
-                        summary_map[c["id"]] = P.summary(c)
+                        summary_map[c["id"]] = prov.summary(c)
                 except Exception:
                     pass
 
@@ -2354,6 +2984,7 @@ class Handler(BaseHTTPRequestHandler):
             if (r.get("name") or "").strip().startswith("#"):
                 continue  # # comment lines
             sid = (r.get("scryfall_id") or "").strip()
+            row_game = (r.get("game") or "").strip().lower() or game
             foil = 1 if str(r.get("foil", "0")).strip().lower() in (
                 "1", "true", "yes", "y", "foil", "✦") else 0
             try:
@@ -2374,41 +3005,41 @@ class Handler(BaseHTTPRequestHandler):
                 "1", "true", "yes", "y") else 0
             s = summary_map.get(sid)
             if s is None and sid:
-                card = fetch_card(sid)
+                card = fetch_card(sid, row_game)
                 if card:
-                    s = P.summary(card)
-            if s is None and P.id == "riftbound":
-                s = P.resolve_row(r)
+                    s = provider_for(row_game).summary(card)
+            if s is None and row_game == "riftbound":
+                s = provider_for("riftbound").resolve_row(r)
             if s is None:
                 set_code = (r.get("set_code") or "").strip()
                 num = (r.get("collector_number") or "").strip()
                 name = (r.get("name") or "").strip()
                 if set_code and num:
-                    s = local_exact_match(set_code, num)
-                    if s is None and P.has_api:
+                    s = local_exact_match(set_code, num, row_game)
+                    if s is None and provider_for(row_game).has_api:
                         try:
-                            s = P.exact_lookup(set_code, num)
+                            s = provider_for(row_game).exact_lookup(set_code, num)
                         except Exception:
                             s = None
                 if s is None and name:
-                    s = local_name_match(name)
-                    if s is None and P.has_api:
+                    s = local_name_match(name, row_game)
+                    if s is None and provider_for(row_game).has_api:
                         try:
-                            s = P.name_lookup(name)
+                            s = provider_for(row_game).name_lookup(name)
                         except Exception:
                             s = None
             if s is None:
                 errors.append(name or sid or "?")
                 continue
-            resolved.append((s, foil, qty, cond, pp, trade, sale))
+            resolved.append((s, foil, qty, cond, pp, trade, sale, row_game))
 
         added = updated = 0
         ts = now_iso()
         with db_lock, db() as conn:
-            for s, foil, qty, cond, pp, trade, sale in resolved:
+            for s, foil, qty, cond, pp, trade, sale, row_game in resolved:
                 existing = conn.execute(
-                    "SELECT id FROM cards WHERE scryfall_id=? AND foil=?",
-                    (s["scryfall_id"], foil)).fetchone()
+                    "SELECT id FROM cards WHERE scryfall_id=? AND foil=? AND game=?",
+                    (s["scryfall_id"], foil, row_game)).fetchone()
                 if existing:
                     conn.execute(
                         "UPDATE cards SET quantity=quantity+?, price_usd=?, "
@@ -2425,14 +3056,15 @@ class Handler(BaseHTTPRequestHandler):
                            type_line, colors, image_uri, scryfall_uri,
                            back_image_uri, foil, quantity, price_usd,
                            price_usd_foil, price_updated_at, added_at, condition,
-                           purchase_price, for_trade, for_sale)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                           purchase_price, for_trade, for_sale, game)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (s["scryfall_id"], s["name"], s["set_code"],
                          s["set_name"], s["collector_number"], s["rarity"],
                          s["mana_cost"], s["type_line"], s["colors"],
                          s["image_uri"], s["scryfall_uri"],
                          s.get("back_image_uri"), foil, qty, s["price_usd"],
-                         s["price_usd_foil"], ts, ts, cond, pp, trade, sale))
+                         s["price_usd_foil"], ts, ts, cond, pp, trade, sale,
+                         row_game))
                     added += 1
         backup_db()
         broadcast({"type": "library-changed"})
@@ -2440,15 +3072,18 @@ class Handler(BaseHTTPRequestHandler):
                         "skipped": len(errors), "errors": errors[:5]})
 
     # -- offline database
-    def api_localdb(self):
-        meta = local_meta()
+    def api_localdb(self, game=None):
+        game = (game or "").strip().lower() or DEFAULT_GAME
+        meta = local_meta(game)
+        cards_file, _ = _local_files(game)
+        dstate = _download_state_for(game)
         with _local_lock:
-            available = _local_cards is not None or os.path.exists(LOCAL_CARDS_FILE)
-            downloading = _download_state["active"]
-            phase = _download_state["phase"]
-            done_mb = _download_state["done_mb"]
-            total_mb = _download_state["total_mb"]
-            cards = _download_state["cards"]
+            available = "cards" in _state_for(game) or os.path.exists(cards_file)
+            downloading = dstate["active"]
+            phase = dstate["phase"]
+            done_mb = dstate["done_mb"]
+            total_mb = dstate["total_mb"]
+            cards = dstate["cards"]
         self.send_json({
             "available": available,
             "card_count": (meta or {}).get("card_count", 0),
@@ -2457,11 +3092,12 @@ class Handler(BaseHTTPRequestHandler):
             "done_mb": done_mb, "total_mb": total_mb, "cards": cards})
 
     def api_localdb_download(self):
+        game = self.game_param()
         with _local_lock:
-            if _download_state["active"]:
+            if _download_state_for(game)["active"]:
                 self.send_json({"error": "download already running"}, 409)
                 return
-        download_localdb()
+        download_localdb(game)
         self.send_json({"ok": True, "started": True})
 
 
@@ -2549,7 +3185,8 @@ if __name__ == "__main__":
                              "scanning unavailable\n" % e)
 
     server = TrackerHTTPServer(("0.0.0.0", PORT), Handler)
-    print("Card tracker running (%s, OCR: %s):" % (P.label, backend))
+    print("Card tracker running — MTG · Pokémon TCG · Yu-Gi-Oh! (OCR: %s):"
+          % backend)
     print(f"  This computer: http://localhost:{PORT}/")
     if tls_ok:
         print(f"  Phone:         {phone_url()}  (same Wi-Fi; accept "

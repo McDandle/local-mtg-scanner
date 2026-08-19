@@ -67,10 +67,14 @@ function lineChart(pts, W = 700) {
 }
 
 let data = null;
+let insightsGame = "all";
+function withGame(url) {
+  return url + (url.includes("?") ? "&" : "?") + "game=" + encodeURIComponent(insightsGame);
+}
 
 async function load() {
   try {
-    data = await fetch("/api/insights").then((r) => r.json());
+    data = await fetch(withGame("/api/insights")).then((r) => r.json());
   } catch (err) {
     document.querySelectorAll(".chart-box, .card-list, .progress-list, .commander-list")
       .forEach((el) => { el.innerHTML = `<p class="dim">Failed to load: ${esc(err.message)}</p>`; });
@@ -84,6 +88,11 @@ function render() {
   $("sum-count").textContent = data.total_cards;
   $("sum-wish").textContent = data.wishlist_count;
   $("sum-decks").textContent = data.deck_count || 0;
+
+  // color chart is MTG-only (other games have no mana colors)
+  const colorPanel = $("color-chart").closest(".panel");
+  if (colorPanel) colorPanel.classList.toggle("hidden",
+    insightsGame !== "all" && insightsGame !== "mtg");
 
   // value over time
   const pts = (data.value_history || []).map((h) => ({ t: h.date, v: h.value }));
@@ -196,6 +205,24 @@ function render() {
     `<span class="mini-date">${fmtDate(c.added_at || "")}</span></div>`).join("") ||
     `<p class="dim">No cards yet.</p>`;
   wireCardClicks($("recent"), recent);
+
+  // deck win/loss records + losses by commander
+  const mu = data.matchups || { records: [], matchups_by: [] };
+  $("deck-records").innerHTML = mu.records.length
+    ? mu.records.map((r) =>
+        `<div class="mover-row"><div class="mini-main"><b>${esc(r.name)}</b>` +
+        `<small>${r.wins}W – ${r.losses}L</small></div>` +
+        `<span class="mover-pct ${r.winrate != null && r.winrate >= 50 ? "up" : "down"}">` +
+        `${r.winrate != null ? r.winrate + "%" : "—"}</span></div>`).join("")
+    : `<p class="dim">No games recorded yet — open a deck and log wins and losses.</p>`;
+  $("losses-by").innerHTML = mu.matchups_by.length
+    ? mu.matchups_by.map((o) => {
+        const wr = o.winrate != null ? o.winrate + "%" : "—";
+        return `<div class="mini-row"><span class="mini-rank">${wr}</span>` +
+          `<div class="mini-main"><b>${esc(o.commander)}</b>` +
+          `<small>${o.wins}W – ${o.losses}L</small></div></div>`;
+      }).join("")
+    : `<p class="dim">No games recorded yet.</p>`;
 }
 
 function wireCardClicks(box, cards) {
@@ -205,5 +232,14 @@ function wireCardClicks(box, cards) {
     row.onclick = () => { if (window.openCardModal) window.openCardModal(c); };
   });
 }
+
+$("insights-game").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-game]");
+  if (!b) return;
+  insightsGame = b.dataset.game;
+  document.querySelectorAll("#insights-game button").forEach((x) =>
+    x.classList.toggle("active", x === b));
+  load();
+});
 
 load();

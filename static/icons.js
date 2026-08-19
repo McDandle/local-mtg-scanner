@@ -1,6 +1,6 @@
 "use strict";
 /*
- * Icon system for Local MTG Scanner.
+ * Icon system for Local TCG Scanner.
  * Injects an SVG sprite and exposes window.icon(name) so HTML and JS can
  * swap flat emoji for brass-stroke glyphs. Load right after <body>.
  */

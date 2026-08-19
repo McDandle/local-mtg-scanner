@@ -8,6 +8,26 @@ function imgUrl(u) {
   return "/api/img?u=" + encodeURIComponent(u);
 }
 
+// Card-back for the 3D flip, per game (double-faced cards use their own back).
+function cardBack(card) {
+  if (card && card.back_image_uri) return imgUrl(card.back_image_uri);
+  const g = (card && card.game) || currentGame || "mtg";
+  if (g === "pokemon") return "/pokemon-back.jpg";
+  if (g === "yugioh") return "/yugioh-back.jpg";
+  return "/cardback.jpg";
+}
+
+// External card link, per game (falls back to a product search).
+function cardLinkHref(card) {
+  const c = card || {};
+  if (c.scryfall_uri) return c.scryfall_uri;
+  const g = c.game || currentGame || "mtg";
+  const q = encodeURIComponent(c.name || "");
+  if (g === "pokemon") return "https://www.tcgplayer.com/search/all/product?q=" + q;
+  if (g === "yugioh") return "https://www.ygoprodeck.com/search/?q=" + q;
+  return "#";
+}
+
 // Escape provider/CSV-supplied strings that end up in innerHTML templates.
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (ch) =>
@@ -27,6 +47,85 @@ function setBtnLabel(btn, text) {
   const span = btn && btn.querySelector(".btn-label");
   if (span) span.textContent = text;
   else if (btn) btn.textContent = text;
+}
+
+// ------------------------------------------------------------ game
+const GAMES = [
+  { id: "mtg", label: "MTG", scryfall: "View on Scryfall ↗",
+    foil: "Foil", placeholder: "Search cards — &quot;Plains 189&quot;…" },
+  { id: "pokemon", label: "Pokémon", scryfall: "View on TCGplayer ↗",
+    foil: "Holo", placeholder: "Search cards — &quot;Pikachu 25&quot;…" },
+  { id: "yugioh", label: "Yu-Gi-Oh!", scryfall: "View on YGOPRODeck ↗",
+    foil: "", placeholder: "Search cards — &quot;Dark Magician&quot;…" },
+];
+let currentGame = localStorage.getItem("mtg_game") || "mtg";
+if (!GAMES.some((g) => g.id === currentGame)) currentGame = "mtg";
+function gameMeta() { return GAMES.find((g) => g.id === currentGame) || GAMES[0]; }
+// append ?game= / &game= to a fetch URL
+function withGame(url) {
+  return url + (url.includes("?") ? "&" : "?") + "game=" + encodeURIComponent(currentGame);
+}
+
+const RARITIES = {
+  mtg: ["common", "uncommon", "rare", "mythic", "special"],
+  pokemon: ["Common", "Uncommon", "Rare", "Rare Holo", "Rare Ultra",
+            "Rare Holo EX", "Rare Secret", "Promo"],
+  yugioh: ["Common", "Rare", "Super Rare", "Ultra Rare", "Secret Rare",
+           "Ultimate Rare", "Ghost Rare"],
+};
+
+function applyGameUI() {
+  const meta = gameMeta();
+  // game switch
+  document.querySelectorAll("#game-switch button").forEach((b) =>
+    b.classList.toggle("active", b.dataset.game === currentGame));
+  // foil/holo toggle
+  const foilLabel = $("foil-label");
+  if (foilLabel) foilLabel.textContent = meta.foil;
+  const foilDetail = $("detail-foil-label");
+  if (foilDetail) foilDetail.textContent = meta.foil;
+  document.querySelectorAll("#result-foil, #detail-foil").forEach((inp) => {
+    const label = inp.closest(".foil-toggle");
+    if (label) label.classList.toggle("hidden", !meta.foil);
+  });
+  // color filter + group are MTG-only
+  const colorFilter = $("filter-color");
+  if (colorFilter) colorFilter.classList.toggle("hidden", currentGame !== "mtg");
+  const colorOpt = document.querySelector('#group-select option[value="color"]');
+  if (colorOpt) colorOpt.style.display = currentGame === "mtg" ? "" : "none";
+  // rarity filter options
+  const rar = $("filter-rarity");
+  if (rar && RARITIES[currentGame]) {
+    const cur = rar.value;
+    rar.innerHTML = `<option value="all">Any rarity</option>` +
+      RARITIES[currentGame].map((r) => {
+        const label = currentGame === "mtg"
+          ? r.charAt(0).toUpperCase() + r.slice(1) : r;
+        return `<option value="${esc(r)}">${esc(label)}</option>`;
+      }).join("");
+    if ([...rar.options].some((o) => o.value === cur)) rar.value = cur;
+    else rar.value = "all";
+  }
+  // external link label
+  const link = $("detail-scryfall");
+  if (link) link.textContent = meta.scryfall;
+  const search = $("search-input");
+  if (search) search.placeholder = meta.placeholder.replace(/&quot;/g, '"');
+  document.body.dataset.game = currentGame;
+}
+
+function switchGame(game) {
+  if (!GAMES.some((g) => g.id === game)) return;
+  currentGame = game;
+  try { localStorage.setItem("mtg_game", game); } catch (e) {}
+  applyGameUI();
+  resetPaging();
+  $("search-results").innerHTML = "";
+  $("search-input").value = "";
+  $("filter-rarity").value = "all";
+  $("filter-color").value = "all";
+  loadLibrary();
+  refreshLocaldb();
 }
 
 // ------------------------------------------------------------ state
@@ -107,17 +206,19 @@ function updateStats() {
 
   const bar = $("rarity-bar");
   bar.innerHTML = "";
-  for (const r of RARITY_ORDER) {
+  const present = Object.keys(rar).filter((r) => rar[r] && rar[r].value != null)
+    .sort((a, b) => rar[b].value - rar[a].value);
+  const rarCls = (r) => (RARITY_ORDER.includes(r) ? r : "special");
+  for (const r of present) {
     const d = rar[r];
-    if (!d || !d.value) continue;
     const seg = document.createElement("span");
-    seg.className = r;
+    seg.className = rarCls(r);
     seg.style.width = (d.value / (total || 1)) * 100 + "%";
     seg.title = `${r}: ${d.count} cards · $${d.value.toFixed(0)}`;
     bar.appendChild(seg);
   }
-  const parts = RARITY_ORDER.filter((r) => rar[r] && rar[r].value != null)
-    .map((r) => `<i class="${r}"></i><b>${r}</b> $${rar[r].value.toFixed(0)}`);
+  const parts = present
+    .map((r) => `<i class="${rarCls(r)}"></i><b>${esc(r)}</b> $${rar[r].value.toFixed(0)}`);
   $("breakdown").innerHTML = parts.length ? parts.join("") : "";
 }
 
@@ -132,7 +233,7 @@ $("camera-input").onchange = async (e) => {
   st.classList.remove("hidden");
   try {
     const resized = await downscale(file);
-    const resp = await fetch("/api/scan", {
+    const resp = await fetch(withGame("/api/scan"), {
       method: "POST",
       headers: { "Content-Type": "image/jpeg" },
       body: resized,
@@ -223,7 +324,7 @@ $("result-wishlist").onclick = () => {
 
 $("add-btn").onclick = async () => {
   if (!currentCard) return;
-  const resp = await fetch("/api/add", {
+  const resp = await fetch(withGame("/api/add"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -250,7 +351,7 @@ async function maybeWishlistBought(res, qty) {
   if (!res || !res.ok || !res.wishlist_match) return;
   const wm = res.wishlist_match;
   if (!confirm(`"${wm.name}" was on your wishlist — mark it as bought? (removes it from the wishlist)`)) return;
-  const resp = await fetch("/api/wishlist/bought", {
+  const resp = await fetch(withGame("/api/wishlist/bought"), {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id: wm.id, qty: qty || 1, to_collection: false }),
   });
@@ -379,7 +480,7 @@ async function captureAndIdentify() {
     canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
     const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.8));
     if (!blob) return;
-    const data = await fetch("/api/scan", {
+    const data = await fetch(withGame("/api/scan"), {
       method: "POST",
       headers: { "Content-Type": "image/jpeg" },
       body: blob,
@@ -431,7 +532,7 @@ function handleLiveResult(data) {
     // matches never get added silently.
     if (switchOn("auto-add-switch") && isExact && stableCount === 2 && id !== lastAddedId) {
       lastAddedId = id;
-      fetch("/api/add", {
+      fetch(withGame("/api/add"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ card: data.match, foil: switchOn("scan-foil-switch"), quantity: 1 }),
@@ -486,7 +587,7 @@ $("scan-confirm").onclick = async () => {
   if (!card || confirmedId === card.scryfall_id) return;
   const foil = switchOn("scan-foil-switch");
   try {
-    const resp = await fetch("/api/add", {
+    const resp = await fetch(withGame("/api/add"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ card: card, foil: foil, quantity: 1 }),
@@ -536,7 +637,7 @@ $("search-input").oninput = (e) => {
 };
 
 async function runSearch(q) {
-  const resp = await fetch("/api/search?q=" + encodeURIComponent(q));
+  const resp = await fetch(withGame("/api/search?q=" + encodeURIComponent(q)));
   const data = await resp.json();
   const cards = data.cards || [];
   const box = $("search-results");
@@ -565,7 +666,7 @@ async function runSearch(q) {
 // add a card to the wishlist (server dedupes by printing)
 async function addWishlist(card, btn) {
   try {
-    await fetch("/api/wishlist/add", {
+    await fetch(withGame("/api/wishlist/add"), {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ card }),
     });
@@ -578,7 +679,7 @@ async function addWishlist(card, btn) {
 
 // ------------------------------------------------------------ library
 async function loadLibrary() {
-  const resp = await fetch("/api/collection");
+  const resp = await fetch(withGame("/api/collection"));
   const data = await resp.json();
   libraryCards = data.cards;
   updateStats();
@@ -931,7 +1032,7 @@ $("batch-delete").onclick = async () => {
 
 // ------------------------------------------------------------ export / import
 $("export-btn").onclick = async () => {
-  const resp = await fetch("/api/export");
+  const resp = await fetch(withGame("/api/export"));
   if (!resp.ok) { toast("Export failed"); return; }
   const blob = await resp.blob();
   const a = document.createElement("a");
@@ -950,7 +1051,7 @@ $("import-input").onchange = async (e) => {
   e.target.value = "";
   const text = await f.text();
   try {
-    const resp = await fetch("/api/import", {
+    const resp = await fetch(withGame("/api/import"), {
       method: "POST",
       headers: { "Content-Type": "text/csv" },
       body: text,
@@ -974,7 +1075,7 @@ async function refreshLocaldb() {
   const box = $("localdb-box");
   const chip = $("offline-chip");
   try {
-    const st = await fetch("/api/localdb").then((r) => r.json());
+    const st = await fetch(withGame("/api/localdb")).then((r) => r.json());
     const btn = $("localdb-btn");
     btn.disabled = !!st.downloading;
     if (st.downloading) {
@@ -1023,7 +1124,7 @@ function updateLocaldbBar(st) {
 }
 
 $("localdb-btn").onclick = async () => {
-  const resp = await fetch("/api/localdb/download", { method: "POST" });
+  const resp = await fetch(withGame("/api/localdb/download"), { method: "POST" });
   if (!resp.ok) toast("Download already running", 3000);
   refreshLocaldb();
 };
@@ -1083,7 +1184,7 @@ function openDetail(card) {
   detailCard = card;
   pendingCard = null;
   $("detail-img").src = imgUrl(card.image_uri || "");
-  $("detail-back").src = imgUrl(card.back_image_uri) || "/cardback.jpg";
+  $("detail-back").src = cardBack(card);
   flipReset();
   $("detail-name").innerHTML = esc(card.name) + (card.foil ? " " + icon("foil") : "");
   $("detail-set").textContent =
@@ -1109,7 +1210,7 @@ function openDetail(card) {
   } else {
     gainEl.textContent = "";
   }
-  $("detail-scryfall").href = card.scryfall_uri || "#";
+  $("detail-scryfall").href = cardLinkHref(card);
   // cards without a library row id (e.g. from the wishlist) are view-only
   const canEdit = card.id != null;
   const dc = document.querySelector(".detail-controls");
@@ -1134,7 +1235,7 @@ async function changeDetailQty(d) {
   if (!detailCard) return;
   const newQty = detailCard.quantity + d;
   if (newQty <= 0 && !confirm(`Remove ${detailCard.name} from library?`)) return;
-  const resp = await fetch("/api/update", {
+  const resp = await fetch(withGame("/api/update"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id: detailCard.id, quantity: Math.max(0, newQty) }),
@@ -1157,7 +1258,7 @@ $("detail-save").onclick = async () => {
                  for_trade: $("detail-trade").checked,
                  for_sale: $("detail-sale").checked };
   if (pendingCard) body.card = pendingCard;
-  const resp = await fetch("/api/update", {
+  const resp = await fetch(withGame("/api/update"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -1175,7 +1276,7 @@ $("detail-save").onclick = async () => {
 $("detail-delete").onclick = async () => {
   if (!detailCard) return;
   if (!confirm(`Remove ${detailCard.name} from library?`)) return;
-  await fetch("/api/update", {
+  await fetch(withGame("/api/update"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id: detailCard.id, delete: true }),
@@ -1192,7 +1293,7 @@ $("print-search").oninput = (e) => {
 };
 
 async function runPrintSearch(q) {
-  const resp = await fetch("/api/search?q=" + encodeURIComponent(q));
+  const resp = await fetch(withGame("/api/search?q=" + encodeURIComponent(q)));
   const data = await resp.json();
   const box = $("print-results");
   box.innerHTML = "";
@@ -1215,7 +1316,7 @@ async function showOracle(card) {
   const body = $("oracle-body");
   body.innerHTML = `<p class="dim">Loading…</p>`;
   try {
-    const resp = await fetch("/api/card/" + card.scryfall_id);
+    const resp = await fetch(withGame("/api/card/" + card.scryfall_id));
     const d = await resp.json();
     let html = "";
     if (d.oracle_text) {
@@ -1240,12 +1341,14 @@ function fmtDate(iso) {
 }
 
 async function showHistoryChart(card) {
-  const resp = await fetch("/api/history/" + card.scryfall_id);
+  const box = $("detail-history");
+  const reqId = (box._reqId = (box._reqId || 0) + 1);
+  const resp = await fetch(withGame("/api/history/" + card.scryfall_id));
   const data = await resp.json();
+  if (box._reqId !== reqId) return;  // a newer card was opened — drop stale data
   const pts = (data.history || [])
     .map((h) => ({ t: h.recorded_at, v: card.foil ? h.usd_foil : h.usd }))
     .filter((p) => p.v != null);
-  const box = $("detail-history");
   const render = () => {
     if (pts.length < 2) {
       box.innerHTML = `<p>Not enough price history yet — prices are snapshotted ` +
@@ -1257,7 +1360,8 @@ async function showHistoryChart(card) {
     box.innerHTML = sparkline(pts, Math.max(300, box.clientWidth));
   };
   render();
-  if (window.ResizeObserver && !box._ro) {
+  if (window.ResizeObserver) {
+    if (box._ro) box._ro.disconnect();
     box._ro = new ResizeObserver(render);
     box._ro.observe(box);
   }
@@ -1305,7 +1409,7 @@ $("wishlist-modal").onclick = (e) => {
 };
 
 async function loadWishlist() {
-  const data = await fetch("/api/wishlist").then((r) => r.json());
+  const data = await fetch(withGame("/api/wishlist")).then((r) => r.json());
   const box = $("wishlist-items");
   const items = data.items || [];
   updateWishlistBadge(data.alert_count);
@@ -1335,7 +1439,7 @@ async function loadWishlist() {
   }
   box.querySelectorAll(".wl-rm").forEach((b) => {
     b.onclick = async () => {
-      await fetch("/api/wishlist/remove", {
+      await fetch(withGame("/api/wishlist/remove"), {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: parseInt(b.dataset.id, 10) }),
       });
@@ -1347,7 +1451,7 @@ async function loadWishlist() {
       const id = parseInt(b.dataset.id, 10);
       b.disabled = true;
       try {
-        const resp = await fetch("/api/wishlist/bought", {
+        const resp = await fetch(withGame("/api/wishlist/bought"), {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ id, to_collection: true }),
         });
@@ -1368,7 +1472,7 @@ async function loadWishlist() {
   });
   box.querySelectorAll(".wl-target input").forEach((inp) => {
     inp.onchange = async () => {
-      await fetch("/api/wishlist/update", {
+      await fetch(withGame("/api/wishlist/update"), {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: parseInt(inp.dataset.id, 10), target_price: inp.value }),
       });
@@ -1396,7 +1500,7 @@ $("wishlist-search").oninput = (e) => {
 };
 
 async function runWishlistSearch(q) {
-  const data = await fetch("/api/search?q=" + encodeURIComponent(q)).then((r) => r.json());
+  const data = await fetch(withGame("/api/search?q=" + encodeURIComponent(q))).then((r) => r.json());
   const box = $("wishlist-results");
   box.innerHTML = "";
   for (const c of (data.cards || [])) {
@@ -1406,7 +1510,7 @@ async function runWishlistSearch(q) {
       `<small>${esc(c.set_name)} · #${esc(c.collector_number)} · ` +
       `${c.price_usd != null ? "$" + c.price_usd.toFixed(2) : "—"}</small>`;
     div.onclick = async () => {
-      await fetch("/api/wishlist/add", {
+      await fetch(withGame("/api/wishlist/add"), {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ card: c }),
       });
@@ -1420,7 +1524,7 @@ async function runWishlistSearch(q) {
 }
 
 $("wishlist-refresh").onclick = async () => {
-  const resp = await fetch("/api/wishlist/refresh", { method: "POST" });
+  const resp = await fetch(withGame("/api/wishlist/refresh"), { method: "POST" });
   const d = await resp.json();
   if (!resp.ok) { toast(d.error || "refresh already running", 3000); return; }
   const btn = $("wishlist-refresh");
@@ -1432,7 +1536,7 @@ $("wishlist-refresh").onclick = async () => {
 
 $("detail-wishlist").onclick = async () => {
   if (!detailCard) return;
-  await fetch("/api/wishlist/add", {
+  await fetch(withGame("/api/wishlist/add"), {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ card: detailCard }),
   });
@@ -1471,6 +1575,8 @@ function connectEvents() {
   const es = new EventSource("/api/events");
   es.onmessage = (e) => {
     const evt = JSON.parse(e.data);
+    // Ignore events for a different game's library (prices, adds, local DB).
+    if (evt.game && evt.game !== currentGame) return;
     if (evt.type === "scan" && evt.card) {
       showFeed(`Scanning: ${evt.card.name}`,
         `${evt.card.set_name} · ` +
@@ -1505,7 +1611,7 @@ function connectEvents() {
       toast("Offline DB error: " + evt.error, 4000);
     } else if (evt.type === "wishlist-changed") {
       updateWishlistBadge(0);
-      fetch("/api/wishlist/alerts").then((r) => r.json()).then((d) => updateWishlistBadge(d.count));
+      fetch(withGame("/api/wishlist/alerts")).then((r) => r.json()).then((d) => updateWishlistBadge(d.count));
       if (wishlistOpen) loadWishlist();
     } else if (evt.type === "wishlist-progress") {
       const btn = $("wishlist-refresh");
@@ -1526,7 +1632,7 @@ function connectEvents() {
 }
 
 $("refresh-btn").onclick = async () => {
-  const resp = await fetch("/api/refresh-prices", { method: "POST" });
+  const resp = await fetch(withGame("/api/refresh-prices"), { method: "POST" });
   const data = await resp.json();
   if (!resp.ok) {
     toast(data.error || "Refresh already running", 3000);
@@ -1543,6 +1649,13 @@ connectEvents();
 refreshLocaldb();
 loadLibrary();
 
+// game switcher
+$("game-switch").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-game]");
+  if (b) switchGame(b.dataset.game);
+});
+applyGameUI();
+
 // wishlist alert badge
-fetch("/api/wishlist/alerts").then((r) => r.json()).then((d) => updateWishlistBadge(d.count)).catch(() => {});
+fetch(withGame("/api/wishlist/alerts")).then((r) => r.json()).then((d) => updateWishlistBadge(d.count)).catch(() => {});
 updateCollapseBtns();

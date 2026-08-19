@@ -1,4 +1,4 @@
-"""Deck Builder module for Local MTG Scanner (MIT licensed, see LICENSE).
+"""Deck Builder module for Local TCG Scanner (MIT licensed, see LICENSE).
 
 Loaded optionally by server.py — removing this file (plus static/decks.*)
 cleanly drops every deck feature with no code changes elsewhere.
@@ -81,6 +81,14 @@ CREATE TABLE IF NOT EXISTS deck_value_history (
     missing_value REAL
 );
 CREATE INDEX IF NOT EXISTS idx_deck_value ON deck_value_history (deck_id, recorded_at);
+CREATE TABLE IF NOT EXISTS deck_matches (
+    id INTEGER PRIMARY KEY,
+    deck_id INTEGER NOT NULL,
+    result TEXT NOT NULL,
+    opponent TEXT,
+    recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_deck_matches_deck ON deck_matches (deck_id);
 """
 
 
@@ -664,12 +672,12 @@ def api_deck_missing(self, deck_id, cheapest=False):
 
 def _apply_cheapest(srv, agg):
     """Swap each aggregated missing printing for its cheapest printing."""
-    srv.load_local()
-    if not srv._local_by_name:
+    byname = srv.local_by_name_index()
+    if not byname:
         return
     swapped = {}
     for key, a in list(agg.items()):
-        cands = srv._local_by_name.get(_norm_name(a["name"]), [])
+        cands = byname.get(_norm_name(a["name"]), [])
         best = None
         for c in cands:
             p = c.get("price_usd_foil") if a["foil"] else c.get("price_usd")
@@ -1002,6 +1010,73 @@ def api_deck_value_record(self, deck_id):
         _record_value(conn, deck_id, cards, owned_by_id, owned_by_name)
     self.send_json({"ok": True,
                     "current": _deck_value_from_cards(cards)})
+
+
+# -------------------------------------------------------- win/loss tracker
+
+def api_deck_matches(self, deck_id):
+    """Win/loss record for a deck, plus per-commander head-to-head."""
+    srv = _server()
+    with srv.db_lock, srv.db() as conn:
+        deck = _get_deck_or_404(self, conn, deck_id)
+        if deck is None:
+            return
+        rows = [dict(r) for r in conn.execute(
+            "SELECT id, result, opponent, recorded_at FROM deck_matches "
+            "WHERE deck_id=? ORDER BY id DESC LIMIT 50", (deck_id,))]
+    wins = sum(1 for r in rows if r["result"] == "win")
+    losses = sum(1 for r in rows if r["result"] == "loss")
+    total = wins + losses
+    opp = {}
+    for r in rows:
+        key = ((r.get("opponent") or "").strip().lower()) or "unknown"
+        a = opp.get(key)
+        if a is None:
+            a = {"opponent": (r.get("opponent") or "").strip() or "Unknown",
+                 "wins": 0, "losses": 0}
+            opp[key] = a
+        if r["result"] == "win":
+            a["wins"] += 1
+        else:
+            a["losses"] += 1
+    matchups = sorted(opp.values(), key=lambda a: -(a["wins"] + a["losses"]))
+    for a in matchups:
+        total_a = a["wins"] + a["losses"]
+        a["winrate"] = round(a["wins"] / total_a * 100) if total_a else None
+    self.send_json({
+        "deck_id": deck_id, "wins": wins, "losses": losses, "total": total,
+        "winrate": round(wins / total * 100) if total else None,
+        "matchups": matchups, "recent": rows[:12],
+    })
+
+
+def api_deck_match_add(self, deck_id):
+    srv = _server()
+    body = json.loads(self.read_body())
+    result = "win" if body.get("result") == "win" else "loss"
+    opponent = (body.get("opponent") or "").strip()
+    if not opponent:
+        self.send_json({"error": "commander name required"}, 400)
+        return
+    with srv.db_lock, srv.db() as conn:
+        deck = _get_deck_or_404(self, conn, deck_id)
+        if deck is None:
+            return
+        conn.execute(
+            "INSERT INTO deck_matches (deck_id, result, opponent, recorded_at) "
+            "VALUES (?,?,?,?)", (deck_id, result, opponent, _now_iso()))
+    srv.broadcast({"type": "decks-changed"})
+    self.send_json({"ok": True})
+
+
+def api_deck_match_delete(self):
+    srv = _server()
+    body = json.loads(self.read_body())
+    with srv.db_lock, srv.db() as conn:
+        conn.execute("DELETE FROM deck_matches WHERE id=?",
+                     (int(body.get("id", 0)),))
+    srv.broadcast({"type": "decks-changed"})
+    self.send_json({"ok": True})
 
 
 # ------------------------------------------------- add deck to collection
@@ -1745,6 +1820,10 @@ def handle_get(handler, path, query):
     if m:
         api_deck_value(handler, int(m.group(1)))
         return True
+    m = re.fullmatch(r"/api/decks/(\d+)/matches", path)
+    if m:
+        api_deck_matches(handler, int(m.group(1)))
+        return True
     return False
 
 
@@ -1769,6 +1848,13 @@ def handle_post(handler, path):
         return True
     if path == "/api/collection/import-decklist":
         api_collection_import_decklist(handler)
+        return True
+    if path == "/api/decks/matches/delete":
+        api_deck_match_delete(handler)
+        return True
+    m = re.fullmatch(r"/api/decks/(\d+)/matches", path)
+    if m:
+        api_deck_match_add(handler, int(m.group(1)))
         return True
     m = re.fullmatch(r"/api/decks/(\d+)/update", path)
     if m:

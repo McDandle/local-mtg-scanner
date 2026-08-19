@@ -1,15 +1,20 @@
-# Local MTG Scanner — local, subscription-free collection tracker
+# Local TCG Scanner — local, subscription-free TCG collection tracker
 
-Scan **Magic: The Gathering** cards with your phone's camera, keep the
-library on your own computer. No accounts, no cloud, no premium tier. Card
-data and prices come from the free [Scryfall](https://scryfall.com) API.
-(Experimental support for Pokémon TCG and CSV-defined games is included via
-`CARD_TRACKER_GAME`, but MTG is the focus.)
+Scan **Magic: The Gathering**, **Pokémon TCG**, and **Yu-Gi-Oh!** cards
+with your phone's camera, keep the library on your own computer. No
+accounts, no cloud, no premium tier. All three games run at once from a
+single server — switch between them in the UI, no restart needed. Card
+data and prices come from free sources (see *Data sources* below).
 
 <p align="center"><img src="docs/home-dashboard.gif" width="300" alt="Home dashboard — portfolio value, quick access to library, insights and decks"></p>
 
 - **Home dashboard** — portfolio value over time, recently added cards,
   and one-tap access to the library, decks and insights.
+
+- **Three games, one app** — MTG, Pokémon TCG and Yu-Gi-Oh! all run
+  simultaneously from a single server. A game switcher in the header
+  selects which library/scanner you're using; each game keeps its own
+  collection, offline index, wishlist and price history.
 
 - **Live scanning** — point your phone at cards; each one is OCR'd, matched
   to its *exact printing* (set code + collector number), and streamed to
@@ -29,6 +34,8 @@ data and prices come from the free [Scryfall](https://scryfall.com) API.
 - **Prices & history** — current prices per printing (foil and non-foil),
   snapshotted over time with per-card charts. Automatic backups. Prices
   auto-refresh once a day in the background (plus the manual Prices button).
+  Pokémon prices come from TCGplayer's own bulk feed (accurate, no rate
+  limit); Yu-Gi-Oh! prices from YGOPRODeck.
 - **Library tools** — grid/list views, grouping with expand/collapse-all,
   filters (rarity, color, finish, condition), sorting, batch
   select/edit/delete, oracle text &amp; rulings in the card editor, CSV
@@ -95,10 +102,12 @@ phone). Both devices must be on the same Wi-Fi.
 Configuration is via environment variables (all optional):
 
 ```bash
-CARD_TRACKER_GAME=mtg|pokemon|riftbound   # default mtg
 CARD_TRACKER_PORT=8484                    # HTTP
 CARD_TRACKER_TLS_PORT=8485                # HTTPS (live camera)
 CARD_TRACKER_TESS_LANGS=eng               # Tesseract language packs
+POKEMON_TCG_API_KEY=...                   # optional — raises the
+                                          # pokemontcg.io price limit to
+                                          # 20,000 requests/day
 ```
 
 Auto-start: macOS users can adapt `com.mtgtracker.server.plist` (edit the
@@ -145,11 +154,12 @@ and the tracker is unchanged.
 ## How scanning works
 
 Each camera frame is OCR'd locally. The card **title** and the **bottom
-collector line** (e.g. `M 0026` + `TLE • EN`) are parsed; set code + number
-gives the exact printing (badge: *exact print ✓*), with fuzzy name matching
-as fallback. Matching order: offline database first (instant), then the
-game's API. The search box understands `Plains 189` / `tle 26` style
-queries for pinpointing exact printings manually.
+collector line** (e.g. MTG `M 0026` + `TLE • EN`, Pokémon `189/165`, or
+Yu-Gi-Oh! `FOTB-EN043`) are parsed; set code + number gives the exact
+printing (badge: *exact print ✓*), with fuzzy name matching as fallback.
+Matching order: offline database first (instant), then the game's API.
+The search box understands `Plains 189` / `tle 26` style queries for
+pinpointing exact printings manually.
 
 Live camera streaming requires HTTPS (browser security), which is why the
 phone URL is `https://<your-ip>:8485` with a self-signed cert. If openssl
@@ -245,7 +255,8 @@ Everything lives next to `server.py`:
 
 - `collection.db` — your library (SQLite). Back up this one file.
 - `backups/` — automatic snapshots (at startup, before refreshes/imports).
-- `local_cards.json`, `img_cache/` — optional offline database + images.
+- `local_cards.json`, `local_cards_pokemon.json`, `local_cards_yugioh.json`,
+  `img_cache/` — optional per-game offline databases + images.
 - `assistant.py` — optional needle2 chat (hidden unless `cactus-needle` is installed).
 - CSV export/import from the Library header — works with plain name lists
   and CSVs from other tools too.
@@ -255,15 +266,36 @@ For custom/unsupported games (`CARD_TRACKER_GAME=riftbound`), provide a
 `name,set_code,set_name,collector_number,rarity,type_line,image_uri,price_usd,price_usd_foil`
 and use the offline-database Download button to index it.
 
+## Data sources
+
+- **MTG** — [Scryfall](https://scryfall.com) (bulk JSONL for the offline
+  index, live search &amp; prices).
+- **Pokémon TCG** — the
+  [pokemon-tcg-data](https://github.com/PokemonTCG/pokemon-tcg-data) GitHub
+  repository for the offline index (a single tarball download — **no API
+  rate limit**, so searching/indexing never throttles), plus prices from
+  [tcgcsv.com](https://tcgcsv.com) — TCGplayer's own bulk price feed (also
+  no rate limit, exact TCGplayer market prices), with pokemontcg.io as a
+  fallback.
+- **Yu-Gi-Oh!** — [YGOPRODeck](https://ygoprodeck.com/api-guide/) (one bulk
+  request indexes every card, printings and prices; effectively
+  rate-limit-free for personal use).
+
+Please respect each provider's usage guidelines; the server rate-limits and
+sends a proper User-Agent.
+
 ## Credits & legal
 
-Card data and images come from [Scryfall](https://scryfall.com) (MTG) and
-[pokemontcg.io](https://pokemontcg.io) (Pokémon) — please respect their API
-guidelines (this server rate-limits and sends a proper User-Agent). QR codes
-by [segno](https://github.com/heuer/segno). Optional assistant by
-[Needle 2](https://huggingface.co/Cactus-Compute/needle2) / [Cactus Compute](https://github.com/cactus-compute/needle).
+Card data and images come from [Scryfall](https://scryfall.com) (MTG),
+[pokemontcg.io](https://pokemontcg.io) / the
+[Pokémon TCG Data](https://github.com/PokemonTCG/pokemon-tcg-data) repo
+(Pokémon), and [YGOPRODeck](https://ygoprodeck.com) (Yu-Gi-Oh!) — please
+respect their API guidelines (this server rate-limits and sends a proper
+User-Agent). QR codes by [segno](https://github.com/heuer/segno). Optional
+assistant by [Needle 2](https://huggingface.co/Cactus-Compute/needle2) /
+[Cactus Compute](https://github.com/cactus-compute/needle).
 
-Local MTG Scanner is unofficial Fan Content permitted under the
+Local TCG Scanner is unofficial Fan Content permitted under the
 [Fan Content Policy](https://company.wizards.com/en/legal/fancontentpolicy).
 Not approved/endorsed by Wizards. Portions of the materials used (including
 card images and the Magic card back) are property of Wizards of the Coast.
